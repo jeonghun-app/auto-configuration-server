@@ -165,7 +165,11 @@ class DmService:
 
         log.info(
             "dm session init",
-            extra={"session": session.session_id, "device": session.device_id, "gets": len(uris)},
+            extra={
+                "session": session.session_id,
+                "device_id": session.device_id,
+                "gets": len(uris),
+            },
         )
         return DmResponse(
             status_code=200,
@@ -187,7 +191,7 @@ class DmService:
             "dm configuration pushed",
             extra={
                 "session": session.session_id,
-                "device": session.device_id,
+                "device_id": session.device_id,
                 "nodes": len(values),
             },
         )

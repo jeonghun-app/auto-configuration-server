@@ -18,6 +18,11 @@ _SENSITIVE_KEYS: Final[frozenset[str]] = frozenset(
         "imei",
         "imeisv",
         "msisdn",
+        # An OMA-DM DevId is IMEI-derived, so it is a device identifier too and
+        # must be redacted under whatever name it travels.
+        "device",
+        "device_id",
+        "devid",
         "otp",
         "token",
         "password",

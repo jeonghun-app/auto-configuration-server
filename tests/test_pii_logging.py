@@ -49,13 +49,24 @@ def test_mapping_redaction_covers_every_sensitive_key() -> None:
         "imsi": TEST_IMSI,
         "imei": TEST_IMEI,
         "msisdn": TEST_MSISDN,
+        "device_id": TEST_IMEI,
+        "device": TEST_IMEI,
         "otp": "123456",
         "token": "secret-token",
         "authorization": "Basic abc",
         "version": 3,
     }
     redacted = redact_mapping(payload, "mask")
-    for key in ("imsi", "imei", "msisdn", "otp", "token", "authorization"):
+    for key in (
+        "imsi",
+        "imei",
+        "msisdn",
+        "device_id",
+        "device",
+        "otp",
+        "token",
+        "authorization",
+    ):
         assert redacted[key] != payload[key], key
     assert redacted["version"] == 3
 
@@ -153,6 +164,37 @@ def test_no_raw_identifier_appears_in_request_logs(
     assert TEST_IMEI not in output
     assert TEST_MSISDN not in output
     assert TEST_MSISDN.lstrip("+") not in output
+
+
+def test_no_raw_identifier_appears_in_oma_dm_logs(
+    client: TestClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The DM SyncHdr source is IMEI-derived, so the session logs are a second
+    # place a device identifier can leak. CI caught exactly this once.
+    payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+<SyncML xmlns="SYNCML:SYNCML1.2">
+  <SyncHdr>
+    <VerDTD>1.2</VerDTD>
+    <VerProto>DM/1.2</VerProto>
+    <SessionID>77</SessionID>
+    <MsgID>1</MsgID>
+    <Target><LocURI>https://acs.example.com/dm</LocURI></Target>
+    <Source><LocURI>IMEI:{TEST_IMEI}</LocURI><LocName>{TEST_IMSI}</LocName></Source>
+  </SyncHdr>
+  <SyncBody>
+    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>
+    <Final/>
+  </SyncBody>
+</SyncML>
+""".encode()
+    capsys.readouterr()
+    response = client.post(
+        "/dm", content=payload, headers={"Content-Type": "application/vnd.syncml.dm+xml"}
+    )
+    assert response.status_code == 200
+    output = capsys.readouterr().out
+    assert TEST_IMEI not in output
+    assert TEST_IMSI not in output
 
 
 def test_uvicorn_access_log_is_disabled(settings: Settings) -> None:

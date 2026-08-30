@@ -26,7 +26,7 @@ Korean version of this document: [README.ko.md](README.ko.md).
 
 ```bash
 make install                 # create .venv and install dependencies
-make test                    # 409 tests
+make test                    # 456 tests
 make docker-run              # build and run the container on :8080
 make verify                  # end-to-end check of both planes
 ```
@@ -214,6 +214,33 @@ file — no server code changes. `GET /dm/mo` lists what is loaded.
 
 See [docs/oma-dm.md](docs/oma-dm.md).
 
+## Operator console
+
+An installation comes with a management page, not only a JSON API. `GET /admin/ui`
+is a server-rendered console covering the three things an operator works with:
+
+| Page | What it manages |
+| --- | --- |
+| **Numbers** | Subscribers searchable by MSISDN or IMSI: entitlement, RCS profile, VoLTE, IMEI allowlist, the forced configuration version, and the operational actions (bump version, enable, revoke tokens, issue a token, delete) |
+| **Parameters** (per number) | Per-subscriber overrides of any of the 116 OMA-CP provisioning parameters *or* the 47 OMA-DM management nodes, chosen from the catalogues rather than typed free-hand — an uncatalogued key is refused, because a typo would otherwise sit in the record silently doing nothing |
+| **Devices** | The inventory built from RCC.14 request parameters and from every management node a handset returned over OMA-DM, linked back to its number |
+| **Parameters** (catalogue) | Everything the server can send, filterable, with each entry's specification reference and `verified` flag |
+| **Conformance** | The requirement registry, gaps included |
+
+Security posture, because this page renders subscriber data over the network:
+
+- it **does not exist until `ACS_ADMIN_TOKEN` is set** — the same fail-closed rule
+  as the JSON API, and every route answers `503` without it;
+- sign-in exchanges the token for an HMAC-signed, one-hour session cookie that is
+  `HttpOnly`, `SameSite=Strict`, and `Secure` over HTTPS. The signature uses the
+  admin token itself, so rotating the token invalidates every live session;
+- every mutating form carries a CSRF token bound to that cookie;
+- **no JavaScript at all**, and a CSP of `default-src 'none'` that forbids scripts
+  outright, so even a missed escape cannot execute;
+- every rendered value is escaped — a management object value comes from an
+  untrusted handset, and a test drives an XSS payload through the device pages;
+- pages are `no-store`: they contain IMSI, MSISDN and IMEI.
+
 ## API surface
 
 | Method and path | Purpose |
@@ -223,6 +250,7 @@ See [docs/oma-dm.md](docs/oma-dm.md).
 | `POST /dm` | OMA-DM SyncML session |
 | `GET /dm/mo` | Loaded management objects |
 | `GET /msisdn`, `POST /msisdn`, `POST /msisdn/verify` | MSISDN entry web flow after a `511`. Collects and verifies the number; does **not** yet complete provisioning (`RCC14-AUTH-MSISDN-FLOW`) |
+| `GET /admin/ui` | **Operator console** — server-rendered management pages |
 | `GET /healthz` | Liveness — no AWS calls, so a dependency hiccup cannot deregister healthy tasks |
 | `GET /readyz` | Readiness — store reachability and catalogue integrity |
 | `GET/PUT/DELETE /admin/subscribers…` | Subscriber administration |
@@ -315,7 +343,7 @@ src/acs/
 tools/                       RCS and OMA-DM client simulators
 scripts/                     deploy, teardown, verify, seed, coverage generator
 infra/                       CloudFormation (ECR and application stacks)
-tests/                       409 tests
+tests/                       456 tests
 docs/                        scope, protocol, OMA-DM, AWS, limitations, ADRs
 ```
 
@@ -330,7 +358,7 @@ Current state, measured on this repository:
 
 | Check | Result |
 | --- | --- |
-| `pytest` | 409 passed |
+| `pytest` | 456 passed |
 | Coverage | 93% |
 | `mypy --strict` | clean, 46 source files |
 | `ruff` (lint + format) | clean |

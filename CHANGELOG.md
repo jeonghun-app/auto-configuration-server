@@ -3,6 +3,33 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-08-30
+
+### Added
+
+- **Operator console** at `/admin/ui`, deployed with the service so an
+  installation comes with a management page and not only a JSON API. Server
+  rendered, no JavaScript, five pages:
+  - **Numbers** — subscribers searchable by MSISDN or IMSI, with entitlement,
+    profile, VoLTE, IMEI allowlist, forced configuration version, and the
+    operational actions (bump version, enable, revoke tokens, issue a token,
+    delete).
+  - **Parameters per number** — override any of the 116 OMA-CP parameters or the
+    47 OMA-DM nodes for one subscriber, selected from the catalogues. An
+    uncatalogued key is refused, because a typo would otherwise sit in the record
+    doing nothing.
+  - **Devices** — the inventory built from RCC.14 parameters and from every
+    management node a handset returned over OMA-DM, linked back to its number.
+  - **Parameters catalogue** — everything the server can send, filterable, with
+    each entry's reference and `verified` flag.
+  - **Conformance** — the requirement registry including the gaps.
+- Security: fail-closed without `ACS_ADMIN_TOKEN`; an HMAC-signed, expiring,
+  `HttpOnly`, `SameSite=Strict` session cookie signed with the admin token so
+  rotating it invalidates every session; CSRF on every mutating form; a CSP of
+  `default-src 'none'` that forbids scripts; `no-store` on every page; and every
+  rendered value escaped, with a test driving an XSS payload through the device
+  pages because a management object value comes from an untrusted handset.
+
 ## [1.1.0] — 2026-08-30
 
 A conformance audit of both specification planes, and the fixes it produced.

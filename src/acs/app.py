@@ -11,7 +11,7 @@ from fastapi import APIRouter, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from acs import __version__
-from acs.api import admin, dev, dm, health, msisdn_ui, provisioning
+from acs.api import admin, console, dev, dm, health, msisdn_ui, provisioning
 from acs.api.deps import AppState
 from acs.config import Settings, get_settings
 from acs.errors import AcsError
@@ -81,6 +81,10 @@ def create_app(settings: Settings | None = None, store: Store | None = None) -> 
 
     app.include_router(health.router)
     app.include_router(admin.router)
+    # The operator console ships with the service: an installation comes with a
+    # management page, not only a JSON API. It is unusable until
+    # ACS_ADMIN_TOKEN is set, exactly like the JSON admin API.
+    app.include_router(console.router)
     app.include_router(msisdn_ui.router)
     if resolved.dm_enabled:
         app.include_router(dm.router)
@@ -115,6 +119,14 @@ def _install_middleware(app: FastAPI) -> None:
 
 
 def _install_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(console._Redirect)
+    async def console_redirect(
+        request: Request,  # noqa: ARG001 - required by the handler signature
+        exc: console._Redirect,
+    ) -> Response:
+        # Sign-in redirects are raised from the console's dependency check.
+        return Response(status_code=303, headers={"Location": exc.location})
+
     @app.exception_handler(AcsError)
     async def acs_error_handler(request: Request, exc: AcsError) -> Response:  # noqa: ARG001
         log.info("domain error", extra={"reason": exc.reason, "status": exc.status_code})

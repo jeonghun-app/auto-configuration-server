@@ -7,5 +7,5 @@ DM 1.2) plane for VoLTE and general device management.
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 __all__ = ["__version__"]

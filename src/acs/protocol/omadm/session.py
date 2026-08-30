@@ -35,13 +35,18 @@ from acs.protocol.omadm.syncml import (
     ALERT_CLIENT_INITIATED_MGMT,
     ALERT_END_OF_SESSION,
     ALERT_SERVER_INITIATED_MGMT,
+    ALERT_SESSION_ABORT,
     AUTH_BASIC,
     AUTH_MD5,
     CONTENT_TYPE_XML,
+    STATUS_ALREADY_EXISTS,
     STATUS_AUTH_ACCEPTED,
     STATUS_INVALID_CREDENTIALS,
+    STATUS_MISSING_CREDENTIALS,
     STATUS_NOT_FOUND,
     STATUS_OK,
+    STATUS_OPTIONAL_FEATURE_NOT_SUPPORTED,
+    Command,
     SyncMlBuilder,
     SyncMlMessage,
     SyncMlParseError,
@@ -106,11 +111,15 @@ class DmService:
             )
 
         device_id = _device_id_from(header.source)
-        session = self._store.get_dm_session(header.session_id) or DmSession(
-            session_id=header.session_id,
+        # SessionID is chosen by the device and is commonly a small integer, so
+        # keying on it alone lets two handsets share one server-side session.
+        session_key = _session_key(device_id, header.session_id)
+        session = self._store.get_dm_session(session_key) or DmSession(
+            session_id=session_key,
             device_id=device_id,
             expires_at=int(time.time()) + self._settings.dm_session_ttl_seconds,
         )
+        session.wire_session_id = header.session_id
         if device_id:
             session.device_id = device_id
 
@@ -125,6 +134,20 @@ class DmService:
         if auth_result.username:
             session.imsi = auth_result.username
         session.last_msg_id = int(header.msg_id) if header.msg_id.isdigit() else 0
+
+        if message.has_alert(ALERT_SESSION_ABORT):
+            # The client is abandoning the session; acknowledge and drop the
+            # state rather than continuing to push commands at it.
+            builder = self._ack_only(message, session)
+            self._store.delete_dm_session(session.session_id)
+            log.info("dm session aborted by client", extra={"session": session.session_id})
+            return DmResponse(
+                status_code=200,
+                body=builder.build(final=True),
+                metric="DmSessionAborted",
+                detail="client_abort",
+                session_finished=True,
+            )
 
         if message.has_alert(ALERT_END_OF_SESSION):
             self._store.delete_dm_session(session.session_id)
@@ -183,6 +206,12 @@ class DmService:
 
         builder = self._ack_only(message, session)
         values = self._configuration_values(session)
+
+        # Create the interior nodes first. A Replace on ./3GPP_IMS/1/Timer_T1 gets
+        # 404 on a device where the ./3GPP_IMS/1 instance does not exist yet, which
+        # would silently abandon the whole configuration push.
+        interiors = self._interior_nodes_for(values)
+        builder.add([(uri, "", "node", "node") for uri in interiors])
         builder.replace(values)
         session.phase = "configure"
         self._store.put_dm_session(session)
@@ -193,20 +222,39 @@ class DmService:
                 "session": session.session_id,
                 "device_id": session.device_id,
                 "nodes": len(values),
+                "interior_nodes": len(interiors),
             },
         )
         return DmResponse(
             status_code=200,
             body=builder.build(final=True),
             metric="DmConfigPushed",
-            detail=f"replace:{len(values)}",
+            detail=f"add:{len(interiors)} replace:{len(values)}",
         )
 
+    def _interior_nodes_for(self, values: list[tuple[str, str, str, str]]) -> list[str]:
+        """Interior nodes that must exist before the given leaves can be written.
+
+        Returned parent-first, so ``./3GPP_IMS`` precedes ``./3GPP_IMS/1``. Only
+        nodes the catalogue declares as interior are created: inventing a node the
+        management object does not define would itself be a protocol error.
+        """
+        needed: set[str] = set()
+        for uri, _value, _fmt, _type in values:
+            parts = uri.split("/")
+            for depth in range(2, len(parts)):
+                needed.add("/".join(parts[:depth]))
+        declared = {n.uri for n in self._tree.all_nodes() if n.is_interior}
+        return sorted(needed & declared, key=lambda u: (u.count("/"), u))
+
     def _handle_finish(self, message: SyncMlMessage, session: DmSession) -> DmResponse:
+        # 418 means the node was already there, which is the expected answer to an
+        # Add of an interior node that the device already has. It is not a failure.
+        tolerated = {STATUS_ALREADY_EXISTS}
         failures = [
             command
             for command in message.of("Status")
-            if command.data and not command.data.startswith("2")
+            if command.data and not command.data.startswith("2") and command.data not in tolerated
         ]
         builder = self._ack_only(message, session)
         self._store.delete_dm_session(session.session_id)
@@ -263,11 +311,19 @@ class DmService:
         """
         scheme = AUTH_MD5 if self._settings.dm_auth_scheme == "md5" else AUTH_BASIC
         builder = self._new_builder(message, session)
+        # 407 means "you sent none", 401 means "the ones you sent are wrong".
+        # Collapsing both into 401 tells a client its credentials are bad when
+        # it simply had not been challenged yet.
+        code = (
+            STATUS_MISSING_CREDENTIALS
+            if auth_result.reason == "missing_credentials"
+            else STATUS_INVALID_CREDENTIALS
+        )
         builder.status(
             cmd="SyncHdr",
             msg_ref=message.header.msg_id,
             cmd_ref="0",
-            code=STATUS_INVALID_CREDENTIALS,
+            code=code,
             target_ref=message.header.target,
             challenge=(scheme, auth_result.challenge_nonce),
         )
@@ -283,41 +339,66 @@ class DmService:
         )
 
     def _new_builder(self, message: SyncMlMessage, session: DmSession) -> SyncMlBuilder:
+        # Never advertise more than the client said it can accept. The client
+        # value was previously parsed and thrown away.
+        negotiated = self._settings.dm_max_msg_size
+        if message.header.max_msg_size:
+            negotiated = min(negotiated, message.header.max_msg_size)
         return SyncMlBuilder(
             session_id=message.header.session_id,
             msg_id=int(message.header.msg_id) if message.header.msg_id.isdigit() else 1,
             target=message.header.source or session.device_id,
             source=self._settings.dm_account_uri,
-            max_msg_size=self._settings.dm_max_msg_size,
+            max_msg_size=negotiated,
         )
+
+    #: Commands this server does not execute. Answering them with 200 would be a
+    #: false claim of success — the client would believe a Delete or an Atomic
+    #: block had been applied when nothing happened.
+    UNSUPPORTED_COMMANDS: frozenset[str] = frozenset(
+        {"Copy", "Delete", "Sequence", "Atomic", "Exec"}
+    )
+
+    def _status_for(self, command: Command) -> str:
+        """Decide the SyncML Status code for one received command."""
+        if command.name in self.UNSUPPORTED_COMMANDS:
+            return STATUS_OPTIONAL_FEATURE_NOT_SUPPORTED
+        if (
+            command.name in ("Get", "Replace", "Add")
+            and command.first_uri
+            and self._tree.node(command.first_uri) is None
+        ):
+            return STATUS_NOT_FOUND
+        if command.name in ("Alert", "Results", "Get", "Replace", "Add", "Put"):
+            return STATUS_OK
+        # An unrecognised command name is not something we performed either.
+        return STATUS_OPTIONAL_FEATURE_NOT_SUPPORTED
 
     def _ack_only(self, message: SyncMlMessage, session: DmSession) -> SyncMlBuilder:
         """Acknowledge the header and every command in the incoming package."""
         builder = self._new_builder(message, session)
+        challenge = None
+        if session.authenticated and self._settings.dm_auth_scheme == "md5" and session.nonce:
+            # Rotate the nonce on every successful authenticated message,
+            # otherwise the previous credential stays replayable for the whole
+            # session.
+            challenge = (AUTH_MD5, session.nonce)
         builder.status(
             cmd="SyncHdr",
             msg_ref=message.header.msg_id,
             cmd_ref="0",
             code=STATUS_AUTH_ACCEPTED if session.authenticated else STATUS_OK,
             target_ref=message.header.target,
+            challenge=challenge,
         )
         for command in message.commands:
-            if command.name in ("Status",):
+            if command.name == "Status":
                 continue
-            code = STATUS_OK
-            if command.name == "Results":
-                code = STATUS_OK
-            elif (
-                command.name in ("Get", "Replace")
-                and command.first_uri
-                and (self._tree.node(command.first_uri) is None)
-            ):
-                code = STATUS_NOT_FOUND
             builder.status(
                 cmd=command.name,
                 msg_ref=message.header.msg_id,
                 cmd_ref=str(command.cmd_id),
-                code=code,
+                code=self._status_for(command),
                 target_ref=command.first_uri,
             )
         return builder
@@ -376,6 +457,11 @@ class DmService:
                 continue
             values.append((node.uri, rendered, node.format, node.type))
         return values
+
+
+def _session_key(device_id: str, wire_session_id: str) -> str:
+    """Namespace the client-chosen SessionID by device."""
+    return f"{device_id or 'unknown'}:{wire_session_id}"
 
 
 def _device_id_from(source: str) -> str:

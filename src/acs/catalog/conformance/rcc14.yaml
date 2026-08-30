@@ -1,0 +1,801 @@
+# GSMA RCC.14 ACS and OMA Client Provisioning 1.1 — requirement registry.
+#
+# READ THIS BEFORE READING THE ROWS
+#
+# No RCC.14 or RCC.07 edition is pinned (see docs/scope.md). `level` is THIS
+# PROJECT'S ENGINEERING JUDGEMENT, and `level_verified: false` on every row says
+# so. Rows describe what the code does, not what a certification body has
+# confirmed. Nothing here is certified.
+#
+# The parameter surface itself is counted separately in docs/spec-coverage.md,
+# generated from the catalogues: 116 OMA-CP parameters of which 25 have been
+# cross-checked. This file covers protocol *behaviour*, not parameter spelling.
+
+meta:
+  id: rcc14
+  title: GSMA RCC.14 Service Provider Device Configuration (ACS role)
+  spec: GSMA RCC.14 and RCC.07, with OMA Provisioning Content 1.1 as the document format
+  role: server
+  spec_edition_pinned: false
+
+requirements:
+
+  # ------------------------------------------------------- request handling
+  - id: RCC14-REQ-ENDPOINT
+    title: Serve the configuration request on the paths deployed clients use
+    spec: RCC.14 HTTP configuration request
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/api/provisioning.py::register_config_paths
+    tests:
+      - tests/test_api_config.py::test_every_configured_path_serves_the_flow
+    note: >
+      Deployed clients disagree on the path, so /, /config and /rcs/config are all
+      registered and the list is configurable.
+
+  - id: RCC14-REQ-PARAMETERS
+    title: Parse the documented query parameter set with types and length limits
+    spec: RCC.14 configuration request parameters
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::parse_config_query
+    tests:
+      - tests/test_request_parser.py::test_parses_the_full_documented_parameter_set
+      - tests/test_request_parser.py::test_oversized_terminal_model_is_rejected
+    gap: >
+      The parameter set is taken from public descriptions, not from a pinned
+      RCC.14 edition, so completeness cannot be asserted. Several parsed fields
+      (IMEISV, SMS_format, rcs_state, provisioning_version, device_type,
+      friendly_device_name, alias) are validated and recorded but do not yet
+      influence the document that is built.
+    impact: >
+      A newer client may send a parameter this server files under "unknown". It is
+      logged by name and ignored rather than rejected, so provisioning still
+      succeeds.
+
+  - id: RCC14-REQ-IMSI-STRING
+    title: Treat the IMSI as a string, preserving leading zeros
+    spec: RCC.14 subscriber identity
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::parse_config_query
+    tests:
+      - tests/test_request_parser.py::test_imsi_leading_zeros_are_preserved
+    note: Parsing an IMSI as an integer silently changes the MCC.
+
+  - id: RCC14-REQ-IMEI-TOLERANT
+    title: Accept IMEI and IMEISV shapes including non-Luhn test values
+    spec: RCC.14 device identity
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::parse_config_query
+    tests:
+      - tests/test_request_parser.py::test_imei_and_imeisv_lengths_are_accepted
+      - tests/test_request_parser.py::test_non_luhn_test_imei_is_accepted
+    note: Rejecting a non-Luhn IMEI locks field-test handsets out of provisioning.
+
+  - id: RCC14-REQ-NEGATIVE-VERS
+    title: Accept a negative vers in a request
+    spec: RCC.14 configuration version reporting
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::parse_config_query
+    tests:
+      - tests/test_request_parser.py::test_negative_vers_is_accepted
+    note: Clients echo back the disable value they were previously given.
+
+  - id: RCC14-REQ-REPEATED-APP
+    title: Accept a repeated app parameter and filter the document accordingly
+    spec: RCC.14 application selection
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::parse_config_query
+      - src/acs/protocol/omacp/builder.py::_selected_entries
+    tests:
+      - tests/test_request_parser.py::test_repeated_app_parameter_is_collected
+      - tests/test_api_config.py::test_repeated_app_parameter_filters_the_document
+
+  - id: RCC14-REQ-NO-PARAM-SMUGGLING
+    title: Reject a repeated identity or OTP parameter
+    spec: General request hardening, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/request.py::_one
+    tests:
+      - tests/test_request_parser.py::test_repeated_identity_parameter_is_rejected
+      - tests/test_request_parser.py::test_repeated_otp_is_rejected
+    note: >
+      A duplicate is how a second identity is smuggled past a proxy that only
+      inspects the first occurrence.
+
+  - id: RCC14-REQ-POST-BODY
+    title: Accept the OTP step as a POST body rather than a query string
+    spec: RCC.14 compatibility behaviour
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/api/provisioning.py::_multi_items
+    tests:
+      - tests/test_conformance_protocol.py::test_otp_can_be_supplied_in_a_post_body
+      - tests/test_api_config.py::test_post_is_accepted_for_the_otp_step
+    note: >
+      The point of offering POST is that the OTP need not appear in a query
+      string, where it lands in every proxy access log on the way.
+
+  - id: RCC14-REQ-MALFORMED
+    title: Answer a structurally invalid request without disabling the client
+    spec: RCC.14 error handling, interpretation recorded in ADR-0006
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/api/provisioning.py::handle_configuration_request
+    tests:
+      - tests/test_api_config.py::test_malformed_parameters_are_rejected_with_400
+      - tests/test_api_config.py::test_malformed_status_is_configurable
+    note: >
+      400 by default, configurable to 403. The specification does not pin this
+      down; 400 is chosen because 403 makes a client mark itself as barred.
+
+  # ----------------------------------------------------------- responses
+  - id: RCC14-RESP-CONFIG
+    title: Return 200 with a wap-provisioningdoc to an authenticated client
+    spec: RCC.14 successful configuration
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._serve_configuration
+    tests:
+      - tests/test_api_config.py::test_full_otp_flow_returns_a_valid_document
+      - tests/test_provisioning_service.py::test_correct_otp_returns_the_configuration
+
+  - id: RCC14-RESP-OTP-PENDING
+    title: Signal a pending OTP with 200 and an empty body
+    spec: RCC.14 OTP challenge
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._issue_otp
+    tests:
+      - tests/test_provisioning_service.py::test_first_request_sends_an_otp_and_answers_200_empty
+
+  - id: RCC14-RESP-VERS-ONLY
+    title: Return a VERS-only document when the client already holds the revision
+    spec: RCC.14 configuration version handling
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::build_vers_only_document
+    tests:
+      - tests/test_provisioning_service.py::test_client_holding_the_current_version_gets_a_vers_only_document
+    note: >
+      Omitting this optimisation means re-sending about 130 parameters to the whole
+      fleet on every validity refresh.
+
+  - id: RCC14-RESP-403
+    title: Return 403 for a known but unentitled subscriber
+    spec: RCC.14 authorisation failure
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService.handle
+    tests:
+      - tests/test_provisioning_service.py::test_non_entitled_subscriber_returns_403
+      - tests/test_api_config.py::test_non_entitled_subscriber_receives_403
+
+  - id: RCC14-RESP-511
+    title: Return 511 when the subscriber cannot be identified
+    spec: RCC.14 with RFC 6585 section 6
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._unresolved_outcome
+    tests:
+      - tests/test_provisioning_service.py::test_unknown_subscriber_returns_511
+      - tests/test_api_config.py::test_unknown_subscriber_receives_511
+
+  - id: RCC14-RESP-429
+    title: Return 429 with Retry-After when an OTP rate limit is reached
+    spec: RCC.14 retry behaviour with RFC 6585
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._issue_otp
+    tests:
+      - tests/test_provisioning_service.py::test_daily_quota_exhaustion_returns_429
+
+  - id: RCC14-RESP-503
+    title: Return 503 with Retry-After when the request cannot be served now
+    spec: RCC.14 temporary failure
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._issue_otp
+    tests:
+      - tests/test_provisioning_service.py::test_port_addressed_otp_is_refused_rather_than_downgraded
+    gap: >
+      503 is produced only when the requested SMS delivery mode is unavailable.
+      Store or dependency failures surface as 500 from the generic handler rather
+      than as a retryable 503.
+    impact: >
+      During a DynamoDB outage clients see 500 and back off on their own schedule
+      instead of following a server-supplied Retry-After.
+
+  - id: RCC14-RESP-NO-STORE
+    title: Forbid caching of every configuration response
+    spec: General credential handling, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::_no_store_headers
+    tests:
+      - tests/test_provisioning_service.py::test_every_response_forbids_caching
+      - tests/test_api_config.py::test_configuration_response_declares_xml_and_forbids_caching
+    note: The body carries IMS credentials and a bearer token.
+
+  - id: RCC14-RESP-MSG
+    title: Return a MSG characteristic to show text to the user
+    spec: OMA-CP 1.1 MSG characteristic
+    level: optional
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      builder.msg_characteristic and builder.build_message_document exist and are
+      unit-tested, but no decision path in ProvisioningService selects them, so a
+      MSG document is never returned.
+    impact: >
+      The ACS cannot show terms and conditions or an explanatory message to the
+      user. Wiring it to an arbitrary response purely to claim coverage was
+      rejected; it needs a defined use case first.
+
+  - id: RCC14-RESP-NO-STACKTRACE
+    title: Never leak internal detail to a device on an unhandled error
+    spec: General hardening, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/app.py::_install_exception_handlers
+    tests:
+      - tests/test_api_config.py::test_unhandled_error_does_not_leak_internals
+
+  # ------------------------------------------------ version semantics
+  - id: RCC14-VERS-POSITIVE
+    title: Treat a positive version as a configuration revision to apply
+    spec: RCC.14 configuration version values
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/vers.py::rule_for
+    tests:
+      - tests/test_vers.py::test_every_documented_version_maps_to_its_action
+
+  - id: RCC14-VERS-ZERO
+    title: Treat version 0 as configuration invalid with RCS disabled
+    spec: RCC.14 configuration version values
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    level_verified: false
+    implemented_by:
+      - src/acs/protocol/vers.py::VERS_RULES
+    tests:
+      - tests/test_vers.py::test_every_documented_version_maps_to_its_action
+      - tests/test_provisioning_service.py::test_forced_disable_values_are_served_without_configuration
+
+  - id: RCC14-VERS-NEGATIVE
+    title: Distinguish the disable, dormant and blocked meanings of -1 to -4
+    spec: RCC.14 configuration version values
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/vers.py::VERS_RULES
+    tests:
+      - tests/test_vers.py::test_deleting_versions_are_the_ones_that_wipe_configuration
+      - tests/test_vers.py::test_no_requery_values_are_minus_two_and_minus_four
+      - tests/test_provisioning_service.py::test_forced_disable_values_are_served_without_configuration
+    gap: >
+      The mapping is implemented, centralised in one reviewable table and tested,
+      but only the version 0 row has been cross-checked. The meanings of -1 to -4
+      differ between RCC.14 releases and between vendors.
+    impact: >
+      Serving the wrong negative value can switch RCS off across a fleet, in the
+      -2 and -4 cases without the client asking again. This is the highest-stakes
+      unverified interpretation in the project.
+
+  - id: RCC14-VERS-MONOTONIC
+    title: Never decrease a configuration revision
+    spec: RCC.14 configuration version handling
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/vers.py::next_version
+    tests:
+      - tests/test_vers.py::test_version_bump_is_monotonic_and_recovers_from_disable_values
+      - tests/test_provisioning_service.py::test_zero_stored_version_is_repaired_to_one
+    note: A decreasing version can wedge a client.
+
+  - id: RCC14-VERS-VALIDITY
+    title: Emit a validity lifetime alongside the version
+    spec: RCC.14 VERS validity
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::vers_characteristic
+    tests:
+      - tests/test_omacp_builder.py::test_document_starts_with_vers
+
+  # ------------------------------------------------------ authentication
+  - id: RCC14-AUTH-OTP
+    title: Authenticate a subscriber with a single-use SMS OTP
+    spec: RCC.14 SMS OTP authentication
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/otp.py::verify_challenge
+    tests:
+      - tests/test_otp.py::test_valid_otp_verifies_once
+      - tests/test_provisioning_service.py::test_otp_verification_consumes_the_challenge
+
+  - id: RCC14-AUTH-OTP-ABUSE
+    title: Bound OTP sends and verification attempts
+    spec: General abuse control, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/otp.py::create_challenge
+    tests:
+      - tests/test_otp.py::test_daily_quota_stops_sms_pumping
+      - tests/test_otp.py::test_attempts_are_bounded
+      - tests/test_otp.py::test_resend_within_the_cooldown_is_blocked
+    note: An unbounded OTP endpoint is a direct financial attack on the operator.
+
+  - id: RCC14-AUTH-OTP-PORT
+    title: Deliver the OTP as a port-addressed binary SMS when SMS_port is given
+    spec: RCC.14 OTP delivery
+    level: conditional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_sms.py::test_smpp_sender_is_explicitly_unimplemented
+      - tests/test_sms.py::test_port_addressing_udh_is_built_correctly
+      - tests/test_provisioning_service.py::test_port_addressed_otp_is_refused_rather_than_downgraded
+    gap: >
+      No AWS SMS service can set a User Data Header. SMS_port is carried end to
+      end, the UDH builder is implemented and tested, and the AWS providers raise
+      rather than send a text message the client will never read.
+    impact: >
+      Silent OTP delivery is unavailable, so the user must read and type the code.
+      Requires an operator SMSC over SMPP.
+
+  - id: RCC14-AUTH-TOKEN
+    title: Let a token replace the OTP challenge on later requests
+    spec: RCC.14 token based reconfiguration
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/token.py::verify_token
+    tests:
+      - tests/test_provisioning_service.py::test_token_skips_the_otp_challenge
+      - tests/test_token.py::test_valid_token_resolves
+
+  - id: RCC14-AUTH-TOKEN-BINDING
+    title: Bind a token to the subscriber and the handset, and allow revocation
+    spec: General credential handling, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/token.py::issue_token
+    tests:
+      - tests/test_token.py::test_token_bound_to_another_imei_is_rejected
+      - tests/test_token.py::test_only_the_digest_is_persisted
+      - tests/test_provisioning_service.py::test_revoked_token_forces_rebootstrap
+
+  - id: RCC14-AUTH-TOKEN-INVALID-REBOOTSTRAP
+    title: Send a client back to bootstrapping when its token is invalid
+    spec: RCC.14 token handling
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService.resolve_identity
+    tests:
+      - tests/test_provisioning_service.py::test_invalid_token_sends_the_client_back_to_bootstrapping
+
+  - id: RCC14-AUTH-CLAIM-NOT-CREDENTIAL
+    title: Never authenticate on a claimed identity alone
+    spec: General security requirement, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService.resolve_identity
+    tests:
+      - tests/test_provisioning_service.py::test_bare_msisdn_parameter_is_only_a_claim
+    note: >
+      A bare msisdn or IMSI query parameter is a claim. Treating it as proof would
+      hand one subscriber's IMS credentials to anyone who asked.
+
+  - id: RCC14-AUTH-ENRICHMENT
+    title: Accept an operator-asserted identity header only from a trusted peer
+    spec: RCC.14 network based authentication
+    level: conditional
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/enrichment.py::resolve_enriched_identity
+    tests:
+      - tests/test_enrichment.py::test_trusted_peer_identity_is_accepted
+      - tests/test_enrichment.py::test_untrusted_peer_identity_is_ignored
+      - tests/test_enrichment.py::test_forged_leading_forwarded_for_entry_does_not_grant_trust
+    gap: >
+      Real enrichment requires an operator packet gateway. What exists is a header
+      honoured only when the peer address falls inside an explicitly configured
+      trusted CIDR, and the mechanism is disabled by default.
+    impact: >
+      Seamless provisioning over the mobile network cannot be demonstrated without
+      an operator gateway in front of the service.
+
+  - id: RCC14-AUTH-GBA-CHALLENGE
+    title: Issue a GBA bootstrap challenge with AKAv1-MD5
+    spec: RCC.14 with 3GPP TS 33.220
+    level: conditional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/gba.py::challenge_header
+    tests:
+      - tests/test_gba.py::test_challenge_header_declares_akav1_md5
+      - tests/test_provisioning_service.py::test_gba_challenge_replaces_511_when_enabled
+
+  - id: RCC14-AUTH-GBA-VERIFY
+    title: Verify the GBA Digest response rather than trusting the B-TID
+    spec: RCC.14 with 3GPP TS 33.220 and RFC 2617
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/auth/gba.py::verify_authorization
+      - src/acs/domain/service.py::ProvisioningService._resolve_gba
+    tests:
+      - tests/test_provisioning_service.py::test_gba_btid_alone_does_not_authenticate
+      - tests/test_provisioning_service.py::test_gba_forged_digest_response_is_rejected
+      - tests/test_provisioning_service.py::test_gba_nonce_the_server_never_issued_is_rejected
+      - tests/test_provisioning_service.py::test_gba_response_bound_to_the_http_method
+    note: >
+      A B-TID travels in the clear in the username directive. An earlier revision
+      of this server authenticated on the B-TID alone, which was an authentication
+      bypass; the digest response and the nonce origin are now both verified.
+
+  - id: RCC14-AUTH-GBA-REAL
+    title: Bootstrap keys from a real BSF over Zn
+    spec: 3GPP TS 33.220 Zn interface
+    level: conditional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_gba.py::test_unconfigured_bsf_fails_closed
+      - tests/test_gba.py::test_factory_returns_mock_in_dev_and_failclosed_in_prod
+    gap: >
+      Real GBA needs a USIM performing AKA, a BSF reachable over Ub and an HSS.
+      A BsfClient port and a deterministic mock exist; in staging or production the
+      unconfigured client raises rather than fake a successful bootstrap.
+    impact: >
+      A client that can only authenticate with GBA cannot be provisioned by this
+      server outside a laboratory.
+
+  - id: RCC14-AUTH-MSISDN-FLOW
+    title: Recover from a 511 through the MSISDN entry web flow
+    spec: RCC.14 MSISDN entry
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/api/msisdn_ui.py::msisdn_verify
+    tests:
+      - tests/test_api_config.py::test_msisdn_flow_sends_an_otp_and_verifies_it
+      - tests/test_api_config.py::test_msisdn_flow_does_not_reveal_whether_a_number_exists
+      - tests/test_conformance_protocol.py::test_msisdn_web_verification_does_not_yet_complete_provisioning
+    gap: >
+      The page verifies the OTP and consumes it, but mints no token and records no
+      verified state that the configuration flow can observe. The client's next
+      request therefore finds no pending challenge and is challenged again.
+    impact: >
+      The 511 recovery path does not actually recover. It is the most significant
+      functional gap on the RCS plane, and the reason the README no longer presents
+      this flow as complete.
+
+  # ------------------------------------------------------ OMA-CP document
+  - id: OMACP-DOC-ROOT
+    title: Emit a wap-provisioningdoc version 1.1 root
+    spec: OMA Provisioning Content 1.1
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::to_xml
+    tests:
+      - tests/test_omacp_builder.py::test_serialised_document_is_valid_and_declares_utf8
+      - tests/test_omacp_builder.py::test_structural_validation_rejects_a_wrong_root
+
+  - id: OMACP-DOC-VERS-FIRST
+    title: Always include the VERS characteristic
+    spec: RCC.14 configuration document
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::validate_structure
+    tests:
+      - tests/test_omacp_builder.py::test_structural_validation_catches_a_missing_vers
+
+  - id: OMACP-DOC-APPLICATIONS
+    title: Emit the IMS and RCS applications with the RCS to IMS reference
+    spec: RCC.07 and RCC.14 application structure
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::build_document
+    tests:
+      - tests/test_omacp_builder.py::test_both_applications_are_emitted
+      - tests/test_omacp_builder.py::test_rcs_application_references_the_ims_application
+
+  - id: OMACP-DOC-IDENTITIES
+    title: Derive IMPI, IMPU and home domain from the IMSI
+    spec: 3GPP TS 23.003 naming with TS 24.167
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/identity.py::derive_identity
+    tests:
+      - tests/test_identity_derivation.py::test_derived_identity_matches_the_3gpp_naming_convention
+      - tests/test_omacp_builder.py::test_placeholders_are_resolved_from_the_subscriber
+
+  - id: OMACP-DOC-MNC-LENGTH
+    title: Use the correct MNC length for the subscriber's country
+    spec: 3GPP TS 23.003 IMSI structure
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/identity.py::split_imsi
+    tests:
+      - tests/test_identity_derivation.py::test_north_american_mccs_use_three_digit_mncs
+      - tests/test_identity_derivation.py::test_mnc_length_can_be_overridden
+    gap: >
+      A country table selects 2 or 3 digits and the length can be overridden, but
+      no Subscriber field carries an override, so the table is always used.
+    impact: >
+      For an operator whose MNC length the table gets wrong, every derived IMS
+      domain and ACS FQDN would be wrong. Correcting it currently means editing
+      THREE_DIGIT_MNC_MCC.
+
+  - id: OMACP-DOC-DETERMINISTIC
+    title: Emit parameters in a deterministic order
+    spec: Client compatibility, not an OMA-CP requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::to_xml
+    tests:
+      - tests/test_omacp_builder.py::test_serialisation_is_deterministic
+    note: Some clients are sensitive to element order.
+
+  - id: OMACP-DOC-ESCAPING
+    title: Escape parameter values correctly
+    spec: XML well-formedness
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::_append
+    tests:
+      - tests/test_omacp_builder.py::test_special_characters_in_values_are_escaped
+    note: >
+      Documents are built with lxml, never string templates: a friendly device
+      name may legitimately contain an ampersand or an angle bracket.
+
+  - id: OMACP-DOC-OMIT-EMPTY
+    title: Omit an optional parameter with no value rather than emit an empty one
+    spec: Client compatibility, not an OMA-CP requirement
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::build_document
+    tests:
+      - tests/test_omacp_builder.py::test_empty_optional_values_are_omitted_not_emitted_blank
+    note: Some clients treat an empty string as a real setting.
+
+  - id: OMACP-DOC-SEMANTIC-VALIDATION
+    title: Validate the document against the specification's own rules
+    spec: OMA Provisioning Content 1.1 and RCC.07 parameter tables
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::validate_structure
+    tests:
+      - tests/test_omacp_builder.py::test_serialised_document_is_valid_and_declares_utf8
+    gap: >
+      validate_structure checks generic shape, the root version and the presence of
+      VERS. It does not validate against the OMA-CP DTD, nor check mandatory
+      parameters per application, enum membership or integer ranges. Subscriber
+      overrides bypass type coercion beyond the boolean case.
+    impact: >
+      A malformed override, or a parameter absent from a profile that requires it,
+      would be served to a handset without complaint.
+
+  - id: OMACP-DOC-DEFAULT-SMS-APP
+    title: Suppress messaging authorisations when the client is not the default SMS app
+    spec: RCC.07 default messaging application handling
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::_apply_default_sms_app_policy
+    tests:
+      - tests/test_omacp_builder.py::test_default_sms_app_zero_disables_messaging_authorisations
+    note: Offering standalone messaging otherwise produces duplicate delivery.
+
+  - id: OMACP-DOC-PROFILES
+    title: Vary the document by the client's declared RCS profile
+    spec: GSMA Universal Profile releases
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/catalog.py::load_catalog
+    tests:
+      - tests/test_omacp_builder.py::test_profile_selection_changes_the_document
+      - tests/test_catalog.py::test_up_1_0_removes_chatbot_parameters
+
+  - id: OMACP-DOC-DM-BOOTSTRAP
+    title: Bootstrap the OMA-DM account from the configuration document
+    spec: OMA Provisioning Content w7 application
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/builder.py::dm_account_characteristic
+    tests:
+      - tests/test_omacp_builder.py::test_dm_account_is_bootstrapped_when_a_password_exists
+      - tests/test_e2e_simulators.py::test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp
+    note: >
+      This is the bridge between the two planes, and the chain is verified end to
+      end: provision over RCC.14, read AAUTHSECRET, authenticate a DM session.
+
+  - id: OMACP-DOC-DOCTYPE
+    title: Emit the OMA-CP DOCTYPE declaration
+    spec: OMA Provisioning Content 1.1 document type
+    level: conditional
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::to_xml
+    tests:
+      - tests/test_omacp_builder.py::test_doctype_can_be_emitted
+    gap: >
+      The DOCTYPE can be emitted but the served document omits it, and whether
+      RCC.14 requires it could not be determined without the licensed text.
+    impact: >
+      A client that insists on the DOCTYPE would reject the document. No such
+      client has been observed, and no real handset has been tested.
+
+  - id: OMACP-SEC-XXE
+    title: Parse OMA-CP documents without resolving external entities
+    spec: General XML hardening
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omacp/writer.py::parse
+    tests:
+      - tests/test_omacp_builder.py::test_parser_does_not_resolve_external_entities
+
+  # ------------------------------------------------------------- privacy
+  - id: RCC14-PRIV-NO-PII-LOGS
+    title: Never write a subscriber identifier to a log in the clear
+    spec: Data protection requirement, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/security/pii.py::redact_mapping
+      - src/acs/observability.py::JsonFormatter
+    tests:
+      - tests/test_pii_logging.py::test_no_raw_identifier_appears_in_request_logs
+      - tests/test_pii_logging.py::test_no_raw_identifier_appears_in_oma_dm_logs
+    note: >
+      The identifiers arrive in the query string, so every default access log
+      format records them. uvicorn's access log is disabled for this reason.
+
+  - id: RCC14-PRIV-NO-PII-METRICS
+    title: Keep subscriber identifiers out of metric dimensions
+    spec: Data protection requirement, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/observability.py::Metrics.emit
+    tests:
+      - tests/test_pii_logging.py::test_metric_dimensions_are_low_cardinality
+
+  - id: RCC14-PRIV-NO-ENUMERATION
+    title: Do not reveal whether a subscriber is known
+    spec: Data protection requirement, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/domain/service.py::ProvisioningService._unresolved_outcome
+    tests:
+      - tests/test_api_config.py::test_msisdn_flow_does_not_reveal_whether_a_number_exists
+      - tests/test_provisioning_service.py::test_unknown_subscriber_returns_511
+
+  - id: RCC14-PRIV-TLS
+    title: Serve the configuration endpoint over TLS
+    spec: RCC.14 transport security
+    level: mandatory
+    status: partial
+    verification: code-review-only
+    implemented_by:
+      - infra/app.yaml
+    tests:
+      - tests/test_conformance_protocol.py::test_responses_request_transport_security
+    gap: >
+      TLS is terminated at the load balancer and only when a certificate is
+      supplied. The CloudFormation stack permits an HTTP-only deployment, and
+      scripts/deploy.sh warns rather than refuses.
+    impact: >
+      An HTTP deployment exposes IMSI, IMEI, MSISDN, the OTP and the token on the
+      wire. Acceptable for a demonstration, never for real handsets.
+
+  - id: RCC14-OPS-FAIL-CLOSED
+    title: Refuse to start on a configuration unsafe for the declared environment
+    spec: Operational requirement, not an RCC.14 requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/config.py::Settings.validate_startup
+    tests:
+      - tests/test_api_config.py::test_invalid_production_configuration_refuses_to_start
+      - tests/test_provisioning_service.py::test_gba_cannot_be_enabled_without_a_nonce_secret
+    note: >
+      A misconfigured ACS that starts anyway can switch RCS off on every handset
+      that talks to it.

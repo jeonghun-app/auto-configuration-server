@@ -26,7 +26,7 @@ Korean version of this document: [README.ko.md](README.ko.md).
 
 ```bash
 make install                 # create .venv and install dependencies
-make test                    # 338 tests
+make test                    # 409 tests
 make docker-run              # build and run the container on :8080
 make verify                  # end-to-end check of both planes
 ```
@@ -165,6 +165,36 @@ you check entries off. A single-line YAML edit is all a correction takes.
 Adding a parameter, an operator profile, or an entire managed service is a data
 change. `GET /admin/coverage` reports the same numbers at runtime.
 
+## Are both specifications accommodated?
+
+Counted, not asserted. [`docs/conformance.md`](docs/conformance.md) is generated
+from a requirement registry in `src/acs/catalog/conformance/`, one row per
+specification requirement:
+
+| Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
+| --- | --- | --- | --- | --- | --- |
+| OMA-DM 1.2 (server role) | 58 | 37 | 5 | 16 | 10 |
+| RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 9 | 3 | 7 |
+| **Total** | **113** | **80** | **14** | **19** | **17** |
+
+**The honest answer is "substantially, and here is exactly what is missing".**
+`scripts/gen_conformance.py --strict` exits non-zero, and will keep doing so while
+those 17 mandatory gaps remain. The largest are WBXML SyncML encoding, MaxMsgSize
+message splitting, DM ACLs, server-to-client DM authentication, and completing the
+MSISDN recovery flow.
+
+Four axes are kept deliberately separate so that "implemented" cannot be read as
+"certified": the requirement's **level**, whether that level was **verified**
+against a licensed edition (it never is — nobody here holds the conformance
+requirement tables), the implementation **status**, and the **evidence** behind it.
+Nothing in this repository is certified, and no real handset has ever connected.
+
+The registry is a test, not a document. It fails the build when a cited test is
+renamed, when an implementing symbol disappears, when a row claims a status
+without evidence, when the frozen mandatory-gap list drifts in either direction,
+when a row uses compliance wording, or when the generated document goes stale.
+Each of those six was verified by deliberately breaking it.
+
 ## Extending to OMA-DM and VoLTE
 
 The DM plane is driven by management object definitions in
@@ -192,7 +222,7 @@ See [docs/oma-dm.md](docs/oma-dm.md).
 | `POST` on the same paths | OTP step for clients that avoid putting the OTP in a query string |
 | `POST /dm` | OMA-DM SyncML session |
 | `GET /dm/mo` | Loaded management objects |
-| `GET /msisdn`, `POST /msisdn`, `POST /msisdn/verify` | MSISDN entry web flow used after a `511` |
+| `GET /msisdn`, `POST /msisdn`, `POST /msisdn/verify` | MSISDN entry web flow after a `511`. Collects and verifies the number; does **not** yet complete provisioning (`RCC14-AUTH-MSISDN-FLOW`) |
 | `GET /healthz` | Liveness — no AWS calls, so a dependency hiccup cannot deregister healthy tasks |
 | `GET /readyz` | Readiness — store reachability and catalogue integrity |
 | `GET/PUT/DELETE /admin/subscribers…` | Subscriber administration |
@@ -200,6 +230,7 @@ See [docs/oma-dm.md](docs/oma-dm.md).
 | `POST /admin/subscribers/{imsi}/issue-token` | Mint a provisioning token out of band: pre-provisioning, and verifying a deployment where the OTP cannot be read |
 | `GET /admin/devices` | Device inventory from RCC.14 parameters and DM DevInfo |
 | `GET /admin/coverage` | Live specification coverage |
+| `GET /admin/conformance` | Live conformance registry, including the mandatory gaps |
 | `GET /dev/sms` | Mock SMS outbox — development only, refused in staging and production |
 
 The admin API **fails closed**: with `ACS_ADMIN_TOKEN` unset, every admin route
@@ -284,7 +315,7 @@ src/acs/
 tools/                       RCS and OMA-DM client simulators
 scripts/                     deploy, teardown, verify, seed, coverage generator
 infra/                       CloudFormation (ECR and application stacks)
-tests/                       338 tests
+tests/                       409 tests
 docs/                        scope, protocol, OMA-DM, AWS, limitations, ADRs
 ```
 
@@ -299,7 +330,7 @@ Current state, measured on this repository:
 
 | Check | Result |
 | --- | --- |
-| `pytest` | 338 passed |
+| `pytest` | 409 passed |
 | Coverage | 93% |
 | `mypy --strict` | clean, 46 source files |
 | `ruff` (lint + format) | clean |
@@ -316,7 +347,8 @@ Current state, measured on this repository:
 | [docs/scope.md](docs/scope.md) | Agreed scope: in, out, and what cannot be done |
 | [docs/protocol.md](docs/protocol.md) | Wire-level RCC.14 behaviour |
 | [docs/oma-dm.md](docs/oma-dm.md) | DM session flow and how to add a management object |
-| [docs/spec-coverage.md](docs/spec-coverage.md) | Generated coverage report |
+| [docs/spec-coverage.md](docs/spec-coverage.md) | Generated parameter coverage report |
+| [docs/conformance.md](docs/conformance.md) | Generated requirement-by-requirement conformance registry for both specifications |
 | [docs/aws-deployment.md](docs/aws-deployment.md) | Deployment, cost, hardening |
 | [docs/limitations.md](docs/limitations.md) | Everything this cannot do |
 | [docs/threat-model.md](docs/threat-model.md) | Assets, attackers, mitigations |

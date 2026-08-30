@@ -251,6 +251,24 @@ def test_coverage_endpoint_reports_verified_counts(
     assert "UP_2.4" in coverage["omacp"]["available_profiles"]
 
 
+def test_conformance_endpoint_reports_gaps_not_just_successes(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    body = client.get("/admin/conformance", headers=admin_headers).json()
+    assert body["certified"] is False
+    assert body["specification_editions_pinned"] is False
+    families = {f["id"]: f for f in body["families"]}
+    assert set(families) == {"omadm", "rcc14"}
+    # A deployment that reported only its successes would defeat the point.
+    assert families["omadm"]["mandatory_gaps"]
+    assert families["rcc14"]["mandatory_gaps"]
+    assert families["omadm"]["counts"]["implemented"] > 0
+
+
+def test_conformance_endpoint_requires_the_admin_api(client: TestClient) -> None:
+    assert client.get("/admin/conformance").status_code == 401
+
+
 def test_subscriber_overrides_reach_the_document(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:

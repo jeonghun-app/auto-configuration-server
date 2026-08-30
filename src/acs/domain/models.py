@@ -151,7 +151,10 @@ class DmSession:
     """
 
     session_id: str
+    """Server-side key: the device id namespaced with the wire SessionID."""
     device_id: str
+    wire_session_id: str = ""
+    """The SessionID the device chose, echoed back in every response."""
     imsi: str = ""
     phase: str = "init"
     """init -> devinfo -> configure -> done"""

@@ -17,11 +17,25 @@ log = get_logger(__name__)
 router = APIRouter(tags=["provisioning"])
 
 
-def _multi_items(request: Request) -> dict[str, list[str]]:
-    """Group repeated query parameters, preserving ``app=`` repetition."""
+async def _multi_items(request: Request) -> dict[str, list[str]]:
+    """Group repeated parameters from the query string and, on POST, the body.
+
+    Reading the body matters: the whole point of offering POST is that a client
+    can keep the OTP out of the query string, which otherwise lands in every
+    proxy and load balancer access log on the way.
+    """
     grouped: dict[str, list[str]] = {}
     for key, value in request.query_params.multi_items():
         grouped.setdefault(key, []).append(value)
+
+    if request.method == "POST":
+        content_type = request.headers.get("content-type", "")
+        if "application/x-www-form-urlencoded" in content_type or "multipart/" in content_type:
+            form = await request.form()
+            for key, raw in form.multi_items():
+                # An uploaded file is never a configuration parameter.
+                if isinstance(raw, str):
+                    grouped.setdefault(key, []).append(raw)
     return grouped
 
 
@@ -32,7 +46,7 @@ async def handle_configuration_request(request: Request) -> Response:
 
     try:
         query = parse_config_query(
-            _multi_items(request),
+            await _multi_items(request),
             user_agent=request.headers.get("user-agent", ""),
             max_value_length=settings.max_query_value_length,
         )
@@ -50,6 +64,7 @@ async def handle_configuration_request(request: Request) -> Response:
         query=query,
         headers=dict(request.headers),
         peer=request.client.host if request.client else None,
+        method=request.method,
     )
 
     app_state.metrics.emit(

@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     enrichment_header_name: str = "X-3GPP-Intended-Identity"
     gba_enabled: bool = False
     gba_realm: str = "3GPP-bootstrapping@acs.example.com"
+    gba_nonce_secret: str = ""
+    """HMAC key that makes a GBA challenge nonce verifiable without storing it.
+
+    Required when GBA is enabled: without it a nonce cannot be distinguished
+    from one an attacker invented, which would defeat the digest check."""
+    gba_nonce_max_age_seconds: int = 300
 
     # ---- OMA-DM -----------------------------------------------------------
     dm_enabled: bool = True
@@ -139,6 +145,11 @@ class Settings(BaseSettings):
                 problems.append("pii_log_mode=hash requires pii_hash_secret.")
         if self.gba_enabled and not self.gba_realm:
             problems.append("gba_enabled requires gba_realm.")
+        if self.gba_enabled and not self.gba_nonce_secret:
+            problems.append(
+                "gba_enabled requires gba_nonce_secret: an unsigned nonce cannot be "
+                "verified, so the Digest response check would be bypassable."
+            )
         if self.otp_length < 4 or self.otp_length > 10:
             problems.append("otp_length must be between 4 and 10.")
         return problems

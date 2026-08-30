@@ -6,8 +6,18 @@ cannot be done in any environment without an operator network.
 
 ## Pinned specification editions
 
-`verified: true` in the catalogues means "cross-checked against the edition named
-here". **Record the editions you actually hold before flipping any flag.**
+`verified: true` in the catalogues is intended to mean "cross-checked against the
+edition named here".
+
+**No edition is currently pinned, so today it means something weaker:** the entry
+was cross-checked against public descriptions of the specification and against
+operator configurations widely deployed in the field. That is a real check, but it
+is not a clause citation. Record the editions you actually hold, and re-confirm
+the flagged entries against them, before treating `verified: true` as normative.
+
+The same caveat governs `docs/conformance.md`: every requirement there carries
+`level_verified: false`, because the mandatory/optional classification is this
+project's judgement rather than a reading of the conformance requirement tables.
 
 | Specification | Edition used for this implementation | Status |
 | --- | --- | --- |
@@ -42,8 +52,10 @@ specification text, and the honest statement of coverage is
   OTHER, TRANSPORTPROTO, APN and a service-provider extension, plus the OMA-DM
   account (`w7`).
 - Per-`rcs_profile` overlays and per-subscriber parameter overrides.
-- Identity resolution: provisioning token, operator header enrichment, GBA,
-  SMS OTP, and the MSISDN entry web flow.
+- Identity resolution: provisioning token, operator header enrichment, GBA
+  (with the Digest response verified, not just the B-TID), and SMS OTP. The
+  MSISDN entry web flow collects and verifies a number but does not yet complete
+  provisioning — see `RCC14-AUTH-MSISDN-FLOW` in `docs/conformance.md`.
 - Token lifecycle: issue, IMSI/IMEI binding, expiry, individual and bulk
   revocation.
 
@@ -104,7 +116,8 @@ See [limitations.md](limitations.md) for the full treatment. Summary:
 | VoLTE parameters manageable | yes | `src/acs/catalog/omadm/03-3gpp-ims.yaml`, DM push asserted in tests |
 | Container based | yes | `Dockerfile`, non-root, digest-pinned, read-only root filesystem |
 | Deployable on AWS with one command | yes | `scripts/deploy.sh`, `infra/*.yaml`, cfn-lint clean |
-| Tests written and passing | yes | 338 tests, 93% coverage |
+| Tests written and passing | yes | 409 tests, 93% coverage |
 | Correct operation verified | yes, locally | `scripts/verify_stack.py`: 32 checks against the container, with both the in-memory and DynamoDB backends |
 | Correct operation verified on AWS | yes | Deployed to us-east-1 (ECS Fargate + ALB + DynamoDB + Secrets Manager) and verified live: 29 checks, no raw identifier in CloudWatch Logs, EMF metrics extracted into the `RcsAcs` namespace |
 | Every parameter cross-checked against a licensed spec edition | no | 25 of 116 OMA-CP parameters; see [spec-coverage.md](spec-coverage.md). Stated openly rather than claimed |
+| Both specifications accommodated, requirement by requirement | partly, and counted | 113 requirements registered in [conformance.md](conformance.md): 80 implemented, 14 partial, 19 not implemented, of which 17 are classified mandatory. `scripts/gen_conformance.py --strict` exits non-zero because of them |

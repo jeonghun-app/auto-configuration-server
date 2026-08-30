@@ -53,6 +53,12 @@ jobs:
       - name: Specification coverage document is current
         run: python scripts/gen_spec_coverage.py --check
 
+      - name: Conformance registry document is current
+        run: python scripts/gen_conformance.py --check
+
+      - name: Conformance report (informational; non-zero while gaps remain)
+        run: python scripts/gen_conformance.py --strict || true
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

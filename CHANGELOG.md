@@ -3,6 +3,68 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-08-30
+
+A conformance audit of both specification planes, and the fixes it produced.
+
+### Added
+
+- **Conformance registry.** 113 requirements across OMA-DM 1.2 and RCC.14/OMA-CP
+  declared in `src/acs/catalog/conformance/`, each with a level, an
+  implementation status, the evidence behind it and, for anything less than
+  implemented, the gap and its impact. `docs/conformance.md` is generated from it
+  and `GET /admin/conformance` reports it at runtime.
+- **Meta-tests that make the registry able to fail**: a cited test is resolved
+  both statically and against pytest's collection, implementing symbols are
+  resolved by AST, a status without evidence is refused by the loader, the
+  mandatory-gap set is frozen in a constant so neither a new gap nor a silent
+  upgrade passes unnoticed, compliance wording is rejected, and the generated
+  document is freshness-gated. All six were verified by deliberately breaking
+  them.
+- Wire-level conformance evidence tests (`tests/test_conformance_protocol.py`)
+  that assert what goes out on the wire rather than that a constant exists.
+- `POST /admin/subscribers/{imsi}/issue-token` for pre-provisioning, and for
+  verifying a deployment where the OTP cannot be read.
+- `make conformance`, `make conformance-doc`, and two new CI steps.
+
+### Fixed
+
+- **GBA authentication bypass.** `_resolve_gba` authenticated on the B-TID in the
+  `Authorization` username directive without ever verifying the Digest response,
+  so anyone who had seen a B-TID could provision as that subscriber.
+  `gba.verify_authorization` now recomputes the response with `Ks_NAF` and checks
+  that the nonce is one this server issued, using stateless HMAC-signed nonces.
+  `ACS_GBA_NONCE_SECRET` is now required when GBA is enabled. GBA is off by
+  default, so a default deployment was never exposed.
+- **The DM server claimed to perform commands it had not.** `Delete`, `Copy`,
+  `Sequence`, `Atomic`, `Exec` and unrecognised commands were answered `200`;
+  they are now answered `406`.
+- **Interior nodes were never created.** A `Replace` on `./3GPP_IMS/1/Timer_T1`
+  gets `404` on a device where that instance does not exist, silently abandoning
+  the whole configuration push. Interior nodes are now `Add`ed parent-first, and
+  `418` already-exists is treated as success.
+- `Alert` 1223 now aborts the session and discards its state.
+- The client's `MaxMsgSize` was parsed and discarded; the server no longer
+  advertises more than the client accepts.
+- Missing DM credentials now produce `407`, not `401`.
+- DM sessions were keyed on the client-chosen `SessionID` alone, so two handsets
+  picking the same value shared one server-side session. The key is now
+  namespaced by device.
+- `POST` on the configuration endpoint now reads form parameters, so the OTP can
+  actually be kept out of the query string as documented.
+- An `md5` session now carries a `Chal` on success rather than leaving the
+  previous credential replayable with no further exchange.
+
+### Changed
+
+- `docs/scope.md` no longer claims `verified: true` means a pinned-edition
+  cross-check while also stating that no edition is pinned.
+- The README no longer presents the MSISDN entry flow as complete; it collects and
+  verifies a number but does not yet finish provisioning
+  (`RCC14-AUTH-MSISDN-FLOW`).
+- Device identifiers are redacted under any field name, including the OMA-DM
+  `DevId`.
+
 ## [1.0.0] — 2026-08-30
 
 First release.

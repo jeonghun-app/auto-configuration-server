@@ -80,10 +80,11 @@ class ProvisioningService:
         query: ConfigQuery,
         headers: Mapping[str, str] | None = None,
         peer: str | None = None,
+        method: str = "GET",
     ) -> ProvisioningOutcome:
         """Process one configuration request."""
         headers = headers or {}
-        identity = self.resolve_identity(query, headers, peer)
+        identity = self.resolve_identity(query, headers, peer, method)
 
         if identity.decision is IdentityDecision.NOT_ENTITLED:
             return ProvisioningOutcome(
@@ -108,6 +109,7 @@ class ProvisioningService:
         query: ConfigQuery,
         headers: Mapping[str, str],
         peer: str | None,
+        method: str = "GET",
     ) -> Identity:
         """Run the ordered identity resolution chain (see :mod:`acs.auth.identity`)."""
         settings = self._settings
@@ -146,7 +148,7 @@ class ProvisioningService:
 
         # 3. GBA — interface present, disabled by default.
         if settings.gba_enabled and self._bsf is not None:
-            gba_identity = self._resolve_gba(headers)
+            gba_identity = self._resolve_gba(headers, method)
             if gba_identity is not None:
                 return gba_identity
 
@@ -181,17 +183,33 @@ class ProvisioningService:
             return self._store.get_subscriber_by_msisdn(query.msisdn)
         return None
 
-    def _resolve_gba(self, headers: Mapping[str, str]) -> Identity | None:
+    def _resolve_gba(self, headers: Mapping[str, str], method: str) -> Identity | None:
+        """Resolve a subscriber from a *verified* GBA Digest Authorization header.
+
+        A B-TID travels in the clear in the ``username`` directive, so possession
+        of one proves nothing. The digest response is recomputed with ``Ks_NAF``
+        and the nonce is checked to be one this server issued; only then is the
+        subscriber considered authenticated.
+        """
         authorization = headers.get("authorization", "")
-        if not authorization:
+        if not authorization or self._bsf is None:
             return None
-        directives = gba_mod.parse_authorization(authorization)
-        btid = directives.get("username", "")
-        if not btid or self._bsf is None:
-            return None
-        keys = self._bsf.fetch_keys(btid, self._settings.gba_realm)
-        if keys is None:
-            return None
+
+        check = gba_mod.verify_authorization(
+            header=authorization,
+            realm=self._settings.gba_realm,
+            nonce_secret=self._settings.gba_nonce_secret,
+            method=method,
+            fetch_keys=self._bsf.fetch_keys,
+        )
+        if not check.ok:
+            log.info("gba authorization rejected", extra={"reason": check.reason})
+            # Fall through to a fresh challenge rather than to a weaker method.
+            return unresolved(f"gba_{check.reason}")
+
+        keys = self._bsf.fetch_keys(check.btid, self._settings.gba_realm)
+        if keys is None:  # pragma: no cover - verified above
+            return unresolved("gba_btid_unknown")
         imsi = keys.impi.split("@", 1)[0]
         subscriber = self._store.get_subscriber(imsi)
         if subscriber is None:
@@ -204,7 +222,7 @@ class ProvisioningService:
     def _unresolved_outcome(self, identity: Identity) -> ProvisioningOutcome:
         """HTTP 511, or a GBA challenge when GBA is enabled."""
         if self._settings.gba_enabled and self._bsf is not None:
-            nonce = gba_mod.make_nonce()
+            nonce = gba_mod.make_nonce(self._settings.gba_nonce_secret)
             return ProvisioningOutcome(
                 status_code=401,
                 headers={

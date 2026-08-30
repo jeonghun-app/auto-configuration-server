@@ -22,7 +22,9 @@ from __future__ import annotations
 import base64
 import dataclasses
 import hashlib
+import hmac
 import secrets
+import time
 from typing import Protocol
 
 
@@ -75,8 +77,39 @@ class UnconfiguredBsfClient:
         )
 
 
-def make_nonce() -> str:
-    return base64.b64encode(secrets.token_bytes(16)).decode()
+def make_nonce(secret: str = "", issued_at: int | None = None) -> str:
+    """Return a nonce the server can later verify without storing it.
+
+    The nonce carries its own issue time and an HMAC over that time, so a
+    challenge can be validated statelessly: no shared session store, and a nonce
+    the server never issued cannot be replayed. With no secret the nonce is
+    random and unverifiable, which is only acceptable for tests.
+    """
+    if not secret:
+        return base64.b64encode(secrets.token_bytes(16)).decode()
+    stamp = str(issued_at if issued_at is not None else int(time.time()))
+    signature = hmac.new(secret.encode(), stamp.encode(), hashlib.sha256).hexdigest()[:32]
+    return base64.b64encode(f"{stamp}:{signature}".encode()).decode()
+
+
+def verify_nonce(
+    nonce: str, secret: str, max_age_seconds: int = 300, now: int | None = None
+) -> bool:
+    """Check that a nonce was issued by this server and has not expired."""
+    if not secret or not nonce:
+        return False
+    try:
+        raw = base64.b64decode(nonce, validate=False).decode("utf-8", "replace")
+    except (ValueError, UnicodeDecodeError):
+        return False
+    stamp, _, signature = raw.partition(":")
+    if not signature or not stamp.isdigit():
+        return False
+    expected = hmac.new(secret.encode(), stamp.encode(), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(expected, signature):
+        return False
+    age = (now if now is not None else int(time.time())) - int(stamp)
+    return 0 <= age <= max_age_seconds
 
 
 def challenge_header(realm: str, nonce: str, qop: str = "auth") -> str:
@@ -128,3 +161,68 @@ def build_bsf_client(enabled: bool, is_prod: bool) -> BsfClient | None:
     if is_prod:
         return UnconfiguredBsfClient()
     return MockBsfClient()
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AuthorizationCheck:
+    """Outcome of verifying a GBA ``Authorization`` header."""
+
+    ok: bool
+    btid: str = ""
+    reason: str = ""
+
+
+def verify_authorization(
+    header: str,
+    realm: str,
+    nonce_secret: str,
+    method: str,
+    fetch_keys: object,
+    now: int | None = None,
+    max_nonce_age_seconds: int = 300,
+) -> AuthorizationCheck:
+    """Verify a GBA Digest ``Authorization`` header end to end.
+
+    Possession of a B-TID is **not** authentication: a B-TID travels in the clear
+    in the ``username`` directive, so accepting it alone would let anyone who has
+    seen one provision as that subscriber. The digest response must be
+    recomputed with ``Ks_NAF`` as the password and compared, and the nonce must be
+    one this server issued and has not expired.
+
+    ``fetch_keys`` is ``BsfClient.fetch_keys``; it is only consulted once the
+    header is structurally sound, so an unauthenticated caller cannot use this
+    path to probe the BSF.
+    """
+    directives = parse_authorization(header)
+    if not directives:
+        return AuthorizationCheck(False, reason="not_digest")
+
+    btid = directives.get("username", "")
+    nonce = directives.get("nonce", "")
+    response = directives.get("response", "")
+    uri = directives.get("uri", "")
+    if not btid or not nonce or not response or not uri:
+        return AuthorizationCheck(False, btid=btid, reason="incomplete")
+
+    if not verify_nonce(nonce, nonce_secret, max_nonce_age_seconds, now):
+        # Either forged, replayed after expiry, or issued by a different server.
+        return AuthorizationCheck(False, btid=btid, reason="nonce_invalid")
+
+    keys = fetch_keys(btid, realm)  # type: ignore[operator]
+    if keys is None:
+        return AuthorizationCheck(False, btid=btid, reason="btid_unknown")
+
+    expected = digest_response(
+        username=btid,
+        realm=realm,
+        password=keys.ks_naf,
+        method=method,
+        uri=uri,
+        nonce=nonce,
+        cnonce=directives.get("cnonce", ""),
+        nc=directives.get("nc", "00000001"),
+        qop=directives.get("qop", "auth"),
+    )
+    if not hmac.compare_digest(expected, response):
+        return AuthorizationCheck(False, btid=btid, reason="response_mismatch")
+    return AuthorizationCheck(True, btid=btid, reason="verified")

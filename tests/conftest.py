@@ -95,6 +95,26 @@ def _clear_catalog_caches() -> Iterator[None]:
     get_tree.cache_clear()
 
 
+_COLLECTED: pytest.StashKey[frozenset[str]] = pytest.StashKey()
+
+
+def pytest_collection_modifyitems(
+    session: pytest.Session, config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Record every collected test id.
+
+    The conformance registry names the tests that prove each requirement. Checking
+    those names against what pytest actually collected is what stops the registry
+    from citing tests that were renamed or deleted.
+    """
+    config.stash[_COLLECTED] = frozenset(item.nodeid for item in items)
+
+
+@pytest.fixture
+def collected_node_ids(request: pytest.FixtureRequest) -> frozenset[str]:
+    return request.config.stash.get(_COLLECTED, frozenset())
+
+
 def base_query(**extra: object) -> dict[str, object]:
     """A realistic RCC.14 query string."""
     params: dict[str, object] = {

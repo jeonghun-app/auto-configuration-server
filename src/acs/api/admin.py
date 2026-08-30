@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from acs.api.deps import AppState
 from acs.auth import token as token_mod
+from acs.conformance import load_all as load_conformance
 from acs.domain.models import Subscriber
 from acs.observability import get_logger
 from acs.protocol import vers as vers_mod
@@ -314,5 +315,39 @@ def coverage(app_state: AppState = Depends(require_admin)) -> dict[str, object]:
                 "spec": rule.spec_ref,
             }
             for rule in vers_mod.VERS_RULES
+        ],
+    }
+
+
+@router.get("/conformance")
+def conformance(
+    app_state: AppState = Depends(require_admin),  # noqa: ARG001 - gates the route
+) -> dict[str, object]:
+    """Conformance registry summary, as the running service sees it.
+
+    Reports gaps as well as implemented requirements: a deployment that only ever
+    reported its successes would be the thing this registry exists to prevent.
+    """
+    families = load_conformance()
+    return {
+        "certified": False,
+        "specification_editions_pinned": False,
+        "note": (
+            "Levels are this project's engineering judgement, not citations. "
+            "No GSMA or OMA certification is claimed, and no real handset has been "
+            "tested. See docs/conformance.md and docs/limitations.md."
+        ),
+        "families": [
+            {
+                "id": family.id,
+                "title": family.title,
+                "requirements": len(family.requirements),
+                "counts": family.counts(),
+                "mandatory_gaps": [
+                    {"id": r.id, "title": r.title, "status": r.status}
+                    for r in family.mandatory_gaps
+                ],
+            }
+            for family in families
         ],
     }

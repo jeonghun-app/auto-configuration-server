@@ -1,0 +1,776 @@
+# OMA Device Management 1.2 — server-side requirement registry.
+#
+# READ THIS BEFORE READING THE ROWS
+#
+# `level` (mandatory / optional / conditional) is THIS PROJECT'S ENGINEERING
+# JUDGEMENT, not a citation. `level_verified: false` appears on every row because
+# nobody here holds the OMA DM conformance requirement (SCR) tables. Do not read
+# this file as a statement of compliance. Nothing here is certified.
+#
+# `status` says what the code does. `verification` says how we know:
+#   behaviour-tested        a named test drives it and asserts the wire result
+#   code-review-only        read, but no test asserts the behaviour
+#   public-description-only implemented from public descriptions of the spec
+#   interop-tested          verified against a third-party client (never used
+#                           here: no real device has talked to this server)
+#
+# Every implemented/partial row must name a test that exists, and every gap row
+# must state its impact. tests/test_conformance_registry.py enforces both.
+
+meta:
+  id: omadm
+  title: OMA Device Management 1.2 (server role)
+  spec: OMA-TS-DM_Protocol / DM_RepPro / DM_TND / DM_Security / DM_StdObj, version 1.2
+  role: server
+  spec_edition_pinned: false
+
+requirements:
+
+  # ---------------------------------------------------------------- envelope
+  - id: OMADM-HDR-STRUCTURE
+    title: Accept SyncML with SyncHdr and SyncBody, reject anything else
+    spec: OMA-TS-DM_RepPro, message structure
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::parse
+    tests:
+      - tests/test_dm_syncml.py::test_wrong_root_element_is_rejected
+      - tests/test_dm_syncml.py::test_missing_header_is_rejected
+      - tests/test_dm_syncml.py::test_missing_body_is_rejected
+      - tests/test_dm_syncml.py::test_malformed_xml_is_rejected
+
+  - id: OMADM-HDR-VERDTD
+    title: Emit VerDTD 1.2 in every server message
+    spec: OMA-TS-DM_RepPro, VerDTD
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.build
+    tests:
+      - tests/test_dm_syncml.py::test_builder_emits_a_well_formed_header
+
+  - id: OMADM-HDR-VERPROTO-VALIDATE
+    title: Reject a message whose VerProto is not DM/1.2
+    spec: OMA-TS-DM_Protocol, protocol version negotiation
+    level: mandatory
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      _parse_header defaults a missing or unexpected VerProto to DM/1.2 instead of
+      refusing the message, and no SyncML 513 is produced.
+    impact: >
+      A message claiming a different DM protocol version enters the session state
+      machine and is answered as if it were DM/1.2.
+
+  - id: OMADM-HDR-SESSIONID
+    title: Require and echo the SessionID
+    spec: OMA-TS-DM_RepPro, SessionID
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService.handle
+    tests:
+      - tests/test_dm_session.py::test_missing_session_id_returns_400
+
+  - id: OMADM-HDR-SESSION-BINDING
+    title: Bind server session state to the device, not to the SessionID alone
+    spec: OMA-TS-DM_Protocol, session identification
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::_session_key
+    tests:
+      - tests/test_conformance_protocol.py::test_two_devices_with_the_same_session_id_do_not_collide
+    note: >
+      SessionID is chosen by the device and is commonly a small integer, so keying
+      server state on it alone lets two handsets share one session.
+
+  - id: OMADM-HDR-MSGID
+    title: Require the MsgID and reference it from every Status
+    spec: OMA-TS-DM_RepPro, MsgID and MsgRef
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._ack_only
+    tests:
+      - tests/test_dm_syncml.py::test_status_carries_the_references
+    gap: >
+      The MsgID is required and echoed as MsgRef, but ordering, duplicates and
+      replay are not checked, and the server mirrors the client MsgID rather than
+      keeping its own outbound counter.
+    impact: >
+      A replayed or out-of-order client message is processed as if it were new.
+      Harmless in the strict request and response flow used today; it becomes
+      wrong as soon as the server sends two messages for one client message.
+
+  - id: OMADM-HDR-ADDRESSING
+    title: Set Target to the client source and Source to the DM server URI
+    spec: OMA-TS-DM_RepPro, Target and Source
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._new_builder
+    tests:
+      - tests/test_conformance_protocol.py::test_server_addresses_its_response_to_the_client_source
+
+  - id: OMADM-HDR-MAXMSGSIZE
+    title: Never advertise a message size larger than the client accepts
+    spec: OMA-TS-DM_Protocol, MaxMsgSize negotiation
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._new_builder
+    tests:
+      - tests/test_conformance_protocol.py::test_client_max_msg_size_is_honoured
+
+  - id: OMADM-SIZE-SPLITTING
+    title: Split a package that exceeds the negotiated MaxMsgSize
+    spec: OMA-TS-DM_Protocol, large message handling
+    level: mandatory
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      The negotiated size is advertised but the server always emits its commands
+      in a single package. DmSession.pending exists for this and is unused.
+    impact: >
+      A client advertising a small MaxMsgSize may reject or truncate the
+      configuration push. This is the most likely remaining real-device failure.
+
+  - id: OMADM-ALERT-1222
+    title: Continue a split package on Alert 1222
+    spec: OMA-TS-DM_Protocol, Alert 1222 NEXT MESSAGE
+    level: conditional
+    status: not-implemented
+    verification: code-review-only
+    gap: The constant is defined; no handler exists.
+    impact: >
+      Conditional on OMADM-SIZE-SPLITTING: with no splitting there is never a
+      further package for the client to ask for.
+
+  - id: OMADM-FINAL
+    title: Mark the last message of a package with Final
+    spec: OMA-TS-DM_RepPro, Final
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.build
+    tests:
+      - tests/test_dm_syncml.py::test_non_final_package_omits_final
+      - tests/test_dm_session.py::test_full_session_pushes_ims_and_volte_configuration
+
+  # ------------------------------------------------------------------- flow
+  - id: OMADM-FLOW-CLIENT-INIT
+    title: Accept a client-initiated session opened with Alert 1201
+    spec: OMA-TS-DM_Protocol, client-initiated management session
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._handle_init
+    tests:
+      - tests/test_dm_session.py::test_valid_basic_credentials_are_accepted
+      - tests/test_dm_session.py::test_first_package_without_an_alert_is_a_protocol_error
+
+  - id: OMADM-FLOW-SERVER-INIT-ALERT
+    title: Accept a session opened with Alert 1200
+    spec: OMA-TS-DM_Protocol, server-initiated management session
+    level: conditional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._handle_init
+    tests:
+      - tests/test_dm_session.py::test_server_initiated_alert_is_also_accepted
+
+  - id: OMADM-FLOW-NOTIFICATION
+    title: Originate a server-initiated session notification
+    spec: OMA-TS-DM_Protocol, package 0 notification
+    level: optional
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      Waking a device requires a WAP Push or trigger SMS through an operator SMSC,
+      the same dependency that blocks port-addressed OTP SMS.
+    impact: >
+      Management is client-initiated only. An operator cannot push a configuration
+      change until the device next opens a session.
+
+  - id: OMADM-FLOW-PACKAGES
+    title: Drive the client-init, server-commands, client-results, close flow
+    spec: OMA-TS-DM_Protocol, package flow
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService.handle
+    tests:
+      - tests/test_dm_session.py::test_full_session_pushes_ims_and_volte_configuration
+      - tests/test_e2e_simulators.py::test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp
+
+  - id: OMADM-FLOW-CORRELATION
+    title: Match incoming Status and Results to the commands that were sent
+    spec: OMA-TS-DM_RepPro, CmdRef and MsgRef correlation
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._handle_finish
+    tests:
+      - tests/test_dm_session.py::test_client_reported_failures_are_surfaced
+    gap: >
+      Non-2xx statuses are detected and logged, but CmdRef and MsgRef are not
+      matched against the commands the server issued, and a phase advances even if
+      the expected Results are absent.
+    impact: >
+      The server cannot tell which command a failure belongs to, so it cannot
+      retry or repair selectively.
+
+  - id: OMADM-ALERT-1226-END
+    title: End the session when the client sends Alert 1226
+    spec: OMA-TS-DM_Protocol, end of session
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService.handle
+    tests:
+      - tests/test_dm_session.py::test_client_ending_the_session_is_acknowledged
+
+  - id: OMADM-ALERT-1223-ABORT
+    title: Abort and discard session state when the client sends Alert 1223
+    spec: OMA-TS-DM_Protocol, session abort
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService.handle
+    tests:
+      - tests/test_conformance_protocol.py::test_alert_1223_aborts_the_session
+
+  # --------------------------------------------------------------- commands
+  - id: OMADM-CMD-GET
+    title: Issue Get and consume the Results
+    spec: OMA-TS-DM_Protocol, Get
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.get
+      - src/acs/protocol/omadm/session.py::DmService._absorb_device_values
+    tests:
+      - tests/test_dm_session.py::test_device_inventory_is_recorded_from_the_session
+      - tests/test_dm_syncml.py::test_get_command_lists_every_uri
+
+  - id: OMADM-CMD-REPLACE
+    title: Issue Replace with Format and Type meta for every leaf
+    spec: OMA-TS-DM_Protocol, Replace
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.replace
+      - src/acs/protocol/omadm/session.py::DmService._handle_devinfo
+    tests:
+      - tests/test_dm_syncml.py::test_replace_carries_meta_and_data
+      - tests/test_dm_session.py::test_full_session_pushes_ims_and_volte_configuration
+
+  - id: OMADM-CMD-ADD-INTERIOR
+    title: Add the interior nodes a leaf needs before replacing that leaf
+    spec: OMA-TS-DM_TND, interior node creation
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._interior_nodes_for
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.add
+    tests:
+      - tests/test_conformance_protocol.py::test_interior_nodes_are_added_before_leaves
+      - tests/test_conformance_protocol.py::test_interior_nodes_are_ordered_parent_first
+      - tests/test_dm_syncml.py::test_add_of_an_interior_node_carries_no_data
+
+  - id: OMADM-CMD-STATUS
+    title: Return a Status for the header and for every command received
+    spec: OMA-TS-DM_RepPro, Status
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._ack_only
+    tests:
+      - tests/test_conformance_protocol.py::test_every_received_command_gets_a_status
+
+  - id: OMADM-CMD-RESULTS
+    title: Parse Results and record the values reported by the device
+    spec: OMA-TS-DM_RepPro, Results
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._absorb_device_values
+    tests:
+      - tests/test_dm_session.py::test_device_inventory_is_recorded_from_the_session
+
+  - id: OMADM-CMD-EXEC
+    title: Issue Exec against an executable node
+    spec: OMA-TS-DM_Protocol, Exec
+    level: optional
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.exec_
+    tests:
+      - tests/test_dm_syncml.py::test_exec_and_alert_commands_are_emitted
+    gap: >
+      The command can be generated, but no management object declares an
+      executable node and the session never issues one.
+    impact: >
+      There is nothing to execute today. Required before firmware update could
+      work.
+
+  - id: OMADM-CMD-DELETE
+    title: Issue Delete, or refuse it honestly when received
+    spec: OMA-TS-DM_Protocol, Delete
+    level: optional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_conformance_protocol.py::test_unsupported_commands_are_refused_not_acknowledged
+    gap: >
+      The server never issues Delete, and a received Delete is answered 406 rather
+      than executed.
+    impact: >
+      An operator cannot remove a node over DM. The client is told plainly that
+      the command was not performed, which is the important part.
+
+  - id: OMADM-CMD-COPY
+    title: Issue Copy, or refuse it honestly when received
+    spec: OMA-TS-DM_Protocol, Copy
+    level: optional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_conformance_protocol.py::test_unsupported_commands_are_refused_not_acknowledged
+    gap: Not implemented; a received Copy is answered 406.
+    impact: No operational need in the RCS and VoLTE configuration use case.
+
+  - id: OMADM-CMD-SEQUENCE
+    title: Execute a Sequence block in order
+    spec: OMA-TS-DM_Protocol, Sequence
+    level: optional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_conformance_protocol.py::test_unsupported_commands_are_refused_not_acknowledged
+    gap: >
+      Commands nested inside Sequence are not parsed, and a received Sequence is
+      answered 406 rather than executed.
+    impact: >
+      A client cannot ask the server to execute an ordered block. The server's own
+      pushes are already ordered by construction.
+
+  - id: OMADM-CMD-ATOMIC
+    title: Execute an Atomic block, rolling back on failure
+    spec: OMA-TS-DM_Protocol, Atomic with Status 507 and 516
+    level: optional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_conformance_protocol.py::test_unsupported_commands_are_refused_not_acknowledged
+    gap: >
+      No transaction support, and therefore no 507 or 516. A received Atomic is
+      answered 406.
+    impact: >
+      Multi-node changes are not transactional. A partially applied configuration
+      push is possible and is detected only by reading the returned statuses.
+
+  # ---------------------------------------------------------- status codes
+  - id: OMADM-STATUS-200
+    title: Emit 200 for a command that was performed
+    spec: OMA-TS-DM_RepPro, Status 200
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._status_for
+    tests:
+      - tests/test_conformance_protocol.py::test_every_received_command_gets_a_status
+
+  - id: OMADM-STATUS-212
+    title: Emit 212 when client authentication has been accepted
+    spec: OMA-TS-DM_Security, Status 212
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._ack_only
+    tests:
+      - tests/test_dm_session.py::test_valid_basic_credentials_are_accepted
+
+  - id: OMADM-STATUS-401
+    title: Emit 401 with a Chal when the supplied credentials are wrong
+    spec: OMA-TS-DM_Security, Status 401
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._unauthorised
+    tests:
+      - tests/test_dm_session.py::test_wrong_credentials_produce_401_not_407
+
+  - id: OMADM-STATUS-407
+    title: Emit 407 with a Chal when no credentials were supplied
+    spec: OMA-TS-DM_Security, Status 407
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._unauthorised
+    tests:
+      - tests/test_dm_session.py::test_missing_credentials_produce_a_syncml_challenge
+    note: >
+      Distinguishing 407 from 401 matters: 401 tells a client its credentials are
+      bad when in fact it had not been challenged yet.
+
+  - id: OMADM-STATUS-404
+    title: Emit 404 when a command targets a node the server does not know
+    spec: OMA-TS-DM_RepPro, Status 404
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._status_for
+    tests:
+      - tests/test_dm_session.py::test_unknown_node_in_a_command_is_reported_not_found
+
+  - id: OMADM-STATUS-406
+    title: Emit 406 for a command the server does not implement
+    spec: OMA-TS-DM_RepPro, Status 406
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._status_for
+    tests:
+      - tests/test_conformance_protocol.py::test_unsupported_commands_are_refused_not_acknowledged
+      - tests/test_conformance_protocol.py::test_unknown_command_name_is_refused
+    note: >
+      These commands were previously answered 200, i.e. the server claimed to have
+      performed work it had not done.
+
+  - id: OMADM-STATUS-418
+    title: Treat 418 already-exists as success for an interior node Add
+    spec: OMA-TS-DM_RepPro, Status 418
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._handle_finish
+    tests:
+      - tests/test_conformance_protocol.py::test_already_exists_is_not_treated_as_a_failure
+
+  - id: OMADM-STATUS-425
+    title: Emit 425 when an ACL forbids the operation
+    spec: OMA-TS-DM_Security, Status 425
+    level: conditional
+    status: not-implemented
+    verification: code-review-only
+    gap: Conditional on OMADM-TREE-ACL; no ACL is evaluated, so 425 never applies.
+    impact: No access control is enforced on the management tree.
+
+  - id: OMADM-STATUS-5XX
+    title: Interpret a client 5xx status for a command the server issued
+    spec: OMA-TS-DM_RepPro, Status 500 and 51x
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._handle_finish
+    tests:
+      - tests/test_dm_session.py::test_client_reported_failures_are_surfaced
+    gap: >
+      A failure is counted, logged and reflected in the metric, but there is no
+      retry, repair or alarm path.
+    impact: >
+      A device that rejects part of its configuration stays misconfigured until the
+      next session. Visible in the logs and the DmSessionCompleteWithErrors metric.
+
+  # ------------------------------------------------------- authentication
+  - id: OMADM-AUTH-BASIC
+    title: Verify syncml:auth-basic credentials
+    spec: OMA-TS-DM_Security, basic authentication
+    level: conditional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/auth.py::authenticate
+    tests:
+      - tests/test_dm_session.py::test_valid_basic_credentials_are_accepted
+      - tests/test_dm_session.py::test_wrong_password_is_rejected
+
+  - id: OMADM-AUTH-MD5
+    title: Verify syncml:auth-md5 credentials against a server-issued nonce
+    spec: OMA-TS-DM_Security, MD5 digest authentication
+    level: conditional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/auth.py::authenticate_md5
+    tests:
+      - tests/test_dm_session.py::test_md5_credentials_are_verified_against_the_session_nonce
+      - tests/test_dm_session.py::test_md5_with_a_wrong_password_is_rejected
+
+  - id: OMADM-AUTH-CHAL
+    title: Issue a Chal carrying the next nonce when authentication fails
+    spec: OMA-TS-DM_Security, Chal and NextNonce
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder.status
+    tests:
+      - tests/test_dm_syncml.py::test_authentication_challenge_includes_a_nonce
+      - tests/test_dm_session.py::test_missing_credentials_produce_a_syncml_challenge
+
+  - id: OMADM-AUTH-NONCE-ROTATION
+    title: Send a fresh nonce on each authenticated message
+    spec: OMA-TS-DM_Security, nonce reuse
+    level: mandatory
+    status: partial
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._ack_only
+    tests:
+      - tests/test_conformance_protocol.py::test_md5_sessions_carry_a_chal_on_success
+    gap: >
+      A Chal is now attached to successful authenticated messages, but it repeats
+      the session's current nonce rather than generating a new one per message.
+    impact: >
+      The previous credential stays replayable for the lifetime of the session,
+      bounded by ACS_DM_SESSION_TTL_SECONDS, 600 seconds by default.
+
+  - id: OMADM-AUTH-SERVER-TO-CLIENT
+    title: Authenticate the server to the client when the client challenges it
+    spec: OMA-TS-DM_Security, server authentication
+    level: mandatory
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      SyncMlBuilder.build emits no Cred in the server SyncHdr, and a Chal received
+      from the client is ignored.
+    impact: >
+      A client configured to require mutual DM authentication will abandon the
+      session. Clients that only authenticate themselves are unaffected.
+
+  - id: OMADM-AUTH-NO-ENUMERATION
+    title: Do not reveal whether a DM username exists
+    spec: OMA-TS-DM_Security, credential handling
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/auth.py::authenticate
+    tests:
+      - tests/test_dm_session.py::test_unknown_user_is_indistinguishable_from_a_wrong_password
+
+  # ----------------------------------------------------- management tree
+  - id: OMADM-TREE-ADDRESSING
+    title: Address nodes by URI, distinguishing interior from leaf
+    spec: OMA-TS-DM_TND, node addressing
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/motree.py::MoTree.node
+    tests:
+      - tests/test_dm_motree.py::test_node_lookup_by_uri
+      - tests/test_dm_motree.py::test_children_are_direct_descendants_only
+
+  - id: OMADM-TREE-META
+    title: Send Format and Type meta with every value written
+    spec: OMA-TS-DM_RepPro, Meta Format and Type
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::SyncMlBuilder._meta
+    tests:
+      - tests/test_dm_syncml.py::test_replace_carries_meta_and_data
+
+  - id: OMADM-TREE-ACL
+    title: Represent and enforce node access control lists
+    spec: OMA-TS-DM_TND, access control lists
+    level: mandatory
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      MoNode.access is declared on every node in every management object and is
+      never read. No ACL is evaluated, emitted or queried.
+    impact: >
+      Any authenticated DM peer could operate on any declared node. Reduced in
+      practice because the only peer is the device itself, authenticated with a
+      per-subscriber credential, and the server never executes client commands.
+
+  - id: OMADM-TREE-PROP-LIST
+    title: Support the property and list tree queries
+    spec: OMA-TS-DM_TND, property and list queries
+    level: optional
+    status: not-implemented
+    verification: code-review-only
+    gap: MoTree.node only normalises a trailing slash; query suffixes are not parsed.
+    impact: >
+      The server cannot discover a device's tree structure or node properties, so
+      it cannot adapt its push to what the device actually has.
+
+  - id: OMADM-TREE-CLIENT-GET
+    title: Answer a Get issued by the client with Results
+    spec: OMA-TS-DM_Protocol, Get from client to server
+    level: optional
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_conformance_protocol.py::test_client_get_is_acknowledged_but_not_answered
+    gap: >
+      A client Get receives a Status but never a Results, because the server holds
+      no tree of its own to read.
+    impact: >
+      A client cannot interrogate the server's view. Not used by the RCS or VoLTE
+      management flow.
+
+  # ------------------------------------------------ standardised objects
+  - id: OMADM-MO-DEVINFO
+    title: Read the DevInfo management object
+    spec: OMA-TS-DM_StdObj, DevInfo
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/motree.py::MoTree.device_query_uris
+    tests:
+      - tests/test_dm_motree.py::test_real_tree_loads_the_expected_objects
+      - tests/test_dm_session.py::test_device_inventory_is_recorded_from_the_session
+
+  - id: OMADM-MO-DEVDETAIL
+    title: Read the DevDetail management object
+    spec: OMA-TS-DM_StdObj, DevDetail
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/motree.py::MoTree.device_query_uris
+    tests:
+      - tests/test_dm_motree.py::test_device_query_uris_are_the_device_owned_leaves
+
+  - id: OMADM-MO-DEVDETAIL-URI-LIMITS
+    title: Honour the URI depth and length limits the device reports
+    spec: OMA-TS-DM_StdObj, DevDetail URI limits
+    level: mandatory
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      MaxDepth, MaxTotLen and MaxSegLen are collected into the device inventory
+      and never consulted when building command URIs.
+    impact: >
+      A device with unusually tight URI limits could reject the deeper nodes, for
+      example ./3GPP_IMS/1/Ext/VoLTE/AMRWB_Enabled.
+
+  - id: OMADM-MO-DMACC
+    title: Expose the DM account as a manageable object
+    spec: OMA-TS-DM_StdObj, DMAcc
+    level: optional
+    status: not-implemented
+    verification: code-review-only
+    gap: >
+      The DM account is bootstrapped one way, through the OMA-CP w7
+      characteristic. There is no DMAcc management object, so the account cannot
+      be inspected or rotated over DM.
+    impact: >
+      DM credentials can only be changed by re-provisioning over OMA-CP. w7 and
+      DMAcc are related but not interchangeable and are not presented as such.
+
+  - id: OMADM-MO-EXTENSIBLE
+    title: Add a management object without changing server code
+    spec: OMA-TS-DM_TND, management object definition
+    level: optional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/motree.py::load_tree
+    tests:
+      - tests/test_dm_motree.py::test_a_new_management_object_needs_no_code
+    note: >
+      This is the extensibility requirement the project was asked for: a new
+      managed service is a YAML file.
+
+  # --------------------------------------------------------------- encoding
+  - id: OMADM-ENC-XML
+    title: Accept the XML SyncML encoding
+    spec: OMA-TS-DM_RepPro, XML encoding
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/api/dm.py::dm_session
+    tests:
+      - tests/test_dm_session.py::test_dm_endpoint_answers_over_http
+
+  - id: OMADM-ENC-WBXML
+    title: Accept the WBXML SyncML encoding
+    spec: OMA-TS-DM_RepPro, WBXML encoding
+    level: mandatory
+    status: not-implemented
+    verification: behaviour-tested
+    tests:
+      - tests/test_dm_session.py::test_wbxml_is_refused_explicitly
+    gap: >
+      Only the XML encoding is implemented. A WBXML request is refused with HTTP
+      415 rather than answered with XML the client cannot decode.
+    impact: >
+      A WBXML-only DM client cannot be managed at all. This is the largest
+      remaining interoperability gap on the DM plane.
+
+  - id: OMADM-SEC-XXE
+    title: Parse device-supplied SyncML without resolving external entities
+    spec: General XML hardening, not an OMA requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/syncml.py::parse
+    tests:
+      - tests/test_dm_syncml.py::test_external_entities_are_not_expanded
+
+  - id: OMADM-SEC-BODY-LIMIT
+    title: Bound the size of an accepted DM payload
+    spec: General robustness, not an OMA requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService.handle
+    tests:
+      - tests/test_dm_session.py::test_oversized_payload_is_refused
+      - tests/test_dm_session.py::test_dm_endpoint_refuses_a_huge_body
+
+  - id: OMADM-SEC-SESSION-STORE
+    title: Keep session state where every server task can see it
+    spec: Deployment requirement, not an OMA requirement
+    level: mandatory
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/store/base.py::Store
+    tests:
+      - tests/test_store_dynamodb.py::test_dm_session_round_trip
+      - tests/test_store_dynamodb.py::test_expired_dm_session_is_treated_as_absent
+    note: >
+      A DM session spans several HTTP requests, so in-process state would break
+      the moment the service runs more than one task.

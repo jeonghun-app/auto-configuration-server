@@ -17,6 +17,9 @@ from acs.protocol.omadm.session import DmService, _device_id_from, password_look
 from acs.store.memory import MemoryStore
 
 DM_PASSWORD = "dm-secret-123"
+# The server namespaces the client-chosen SessionID by device so two handsets
+# picking the same value cannot share one server-side session.
+SESSION_KEY = f"{TEST_IMEI}:42"
 DM_CONTENT_TYPE = "application/vnd.syncml.dm+xml"
 
 
@@ -124,8 +127,15 @@ def test_missing_credentials_produce_a_syncml_challenge(dm: DmService) -> None:
     assert outcome.metric == "DmAuthRejected"
     message = syncml.parse(outcome.body)
     status = message.of("Status")[0]
-    assert status.data == syncml.STATUS_INVALID_CREDENTIALS
+    # 407 means "you sent none"; 401 would wrongly say the credentials are bad.
+    assert status.data == syncml.STATUS_MISSING_CREDENTIALS
     assert b"NextNonce" in outcome.body
+
+
+def test_wrong_credentials_produce_401_not_407(dm: DmService) -> None:
+    outcome = dm.handle(package(1, PACKAGE_1_BODY, cred=basic_cred(password="wrong")))
+    status = syncml.parse(outcome.body).of("Status")[0]
+    assert status.data == syncml.STATUS_INVALID_CREDENTIALS
 
 
 def test_wrong_password_is_rejected(dm: DmService) -> None:
@@ -160,7 +170,7 @@ def test_md5_credentials_are_verified_against_the_session_nonce(
 
     first = service.handle(package(1, PACKAGE_1_BODY))
     assert first.metric == "DmAuthRejected"
-    session = dm_store.get_dm_session("42")
+    session = dm_store.get_dm_session(SESSION_KEY)
     assert session is not None and session.nonce
 
     credential = dm_auth.md5_credential(TEST_IMSI, DM_PASSWORD, session.nonce)
@@ -172,7 +182,7 @@ def test_md5_with_a_wrong_password_is_rejected(dm_store: MemoryStore) -> None:
     md5_settings = Settings(env="test", dm_auth_scheme="md5", sms_provider="mock")
     service = DmService(md5_settings, dm_store)
     service.handle(package(1, PACKAGE_1_BODY))
-    session = dm_store.get_dm_session("42")
+    session = dm_store.get_dm_session(SESSION_KEY)
     assert session is not None
     bad = dm_auth.md5_credential(TEST_IMSI, "wrong", session.nonce)
     outcome = service.handle(package(2, PACKAGE_1_BODY, cred=bad, auth_type=syncml.AUTH_MD5))
@@ -223,7 +233,7 @@ def run_session(dm: DmService, dm_store: MemoryStore) -> dict[str, str]:
     third = dm.handle(package(3, third_body, cred=basic_cred()))
     assert third.session_finished is True
     assert third.metric == "DmSessionComplete"
-    assert dm_store.get_dm_session("42") is None
+    assert dm_store.get_dm_session(SESSION_KEY) is None
     return pushed
 
 
@@ -280,7 +290,7 @@ def test_client_ending_the_session_is_acknowledged(dm: DmService, dm_store: Memo
     outcome = dm.handle(package(2, body, cred=basic_cred()))
     assert outcome.session_finished is True
     assert outcome.detail == "client_ended"
-    assert dm_store.get_dm_session("42") is None
+    assert dm_store.get_dm_session(SESSION_KEY) is None
 
 
 def test_first_package_without_an_alert_is_a_protocol_error(dm: DmService) -> None:

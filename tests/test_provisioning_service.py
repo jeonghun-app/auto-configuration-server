@@ -278,19 +278,111 @@ def test_gba_challenge_replaces_511_when_enabled(
     assert "AKAv1-MD5" in outcome.headers["WWW-Authenticate"]
 
 
-def test_gba_bootstrapped_identity_authenticates(
-    settings: Settings, seeded_store: MemoryStore
-) -> None:
+def _gba_service(
+    settings: Settings, seeded_store: MemoryStore, secret: str = "nonce-key"
+) -> tuple[ProvisioningService, object, Settings]:
     from acs.auth.gba import MockBsfClient
 
     bsf = MockBsfClient({"btid-1": f"{TEST_IMSI}@ims.example.org"})
-    gba_settings = settings.model_copy(update={"gba_enabled": True})
+    gba_settings = settings.model_copy(update={"gba_enabled": True, "gba_nonce_secret": secret})
     service = ProvisioningService(gba_settings, seeded_store, MockSmsSender(seeded_store), bsf)
-    identity = service.resolve_identity(
-        query(imsi=None), {"authorization": 'Digest username="btid-1"'}, None
+    return service, bsf, gba_settings
+
+
+def _gba_authorization(
+    bsf: object, gba_settings: Settings, nonce: str, uri: str = "/config", method: str = "GET"
+) -> str:
+    from acs.auth import gba as gba_mod
+
+    keys = bsf.fetch_keys("btid-1", gba_settings.gba_realm)  # type: ignore[attr-defined]
+    assert keys is not None
+    response = gba_mod.digest_response(
+        username="btid-1",
+        realm=gba_settings.gba_realm,
+        password=keys.ks_naf,
+        method=method,
+        uri=uri,
+        nonce=nonce,
+        cnonce="cnonce",
+        nc="00000001",
     )
+    return (
+        f'Digest username="btid-1", realm="{gba_settings.gba_realm}", '
+        f'nonce="{nonce}", uri="{uri}", response="{response}", '
+        'cnonce="cnonce", nc=00000001, qop=auth'
+    )
+
+
+def test_gba_bootstrapped_identity_authenticates(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    from acs.auth import gba as gba_mod
+
+    service, bsf, gba_settings = _gba_service(settings, seeded_store)
+    nonce = gba_mod.make_nonce(gba_settings.gba_nonce_secret)
+    header = _gba_authorization(bsf, gba_settings, nonce)
+    identity = service.resolve_identity(query(imsi=None), {"authorization": header}, None, "GET")
     assert identity.decision is IdentityDecision.AUTHENTICATED
     assert identity.method is IdentityMethod.GBA
+
+
+def test_gba_btid_alone_does_not_authenticate(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    # A B-TID travels in the clear in the username directive. Accepting it without
+    # verifying the digest response would let anyone who has seen one provision as
+    # that subscriber.
+    service, _bsf, _gba_settings = _gba_service(settings, seeded_store)
+    identity = service.resolve_identity(
+        query(imsi=None), {"authorization": 'Digest username="btid-1"'}, None, "GET"
+    )
+    assert identity.decision is not IdentityDecision.AUTHENTICATED
+    assert identity.detail == "gba_incomplete"
+
+
+def test_gba_forged_digest_response_is_rejected(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    from acs.auth import gba as gba_mod
+
+    service, _bsf, gba_settings = _gba_service(settings, seeded_store)
+    nonce = gba_mod.make_nonce(gba_settings.gba_nonce_secret)
+    header = (
+        f'Digest username="btid-1", realm="{gba_settings.gba_realm}", nonce="{nonce}", '
+        'uri="/config", response="00000000000000000000000000000000", '
+        'cnonce="cnonce", nc=00000001, qop=auth'
+    )
+    identity = service.resolve_identity(query(imsi=None), {"authorization": header}, None, "GET")
+    assert identity.decision is not IdentityDecision.AUTHENTICATED
+    assert identity.detail == "gba_response_mismatch"
+
+
+def test_gba_nonce_the_server_never_issued_is_rejected(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    service, bsf, gba_settings = _gba_service(settings, seeded_store)
+    header = _gba_authorization(bsf, gba_settings, nonce="aW52ZW50ZWQ=")
+    identity = service.resolve_identity(query(imsi=None), {"authorization": header}, None, "GET")
+    assert identity.decision is not IdentityDecision.AUTHENTICATED
+    assert identity.detail == "gba_nonce_invalid"
+
+
+def test_gba_response_bound_to_the_http_method(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    from acs.auth import gba as gba_mod
+
+    service, bsf, gba_settings = _gba_service(settings, seeded_store)
+    nonce = gba_mod.make_nonce(gba_settings.gba_nonce_secret)
+    header = _gba_authorization(bsf, gba_settings, nonce, method="GET")
+    # Replaying a GET-derived response on a POST must not verify.
+    identity = service.resolve_identity(query(imsi=None), {"authorization": header}, None, "POST")
+    assert identity.decision is not IdentityDecision.AUTHENTICATED
+
+
+def test_gba_cannot_be_enabled_without_a_nonce_secret() -> None:
+    problems = Settings(env="test", gba_enabled=True, gba_nonce_secret="").validate_startup()
+    assert any("gba_nonce_secret" in p for p in problems)
 
 
 # ------------------------------------------------------------ side effects

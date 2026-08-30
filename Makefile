@@ -4,6 +4,7 @@ VENV := .venv
 COVERAGE_MIN ?= 88
 
 .PHONY: help venv install fmt lint types test test-cov check coverage-doc privacy \
+        conformance conformance-doc \
         docker-build docker-run docker-stop up down verify infra-lint clean
 
 help: ## Show this help
@@ -46,8 +47,17 @@ privacy: ## Refuse committed subscriber identifiers
 coverage-doc: ## Regenerate docs/spec-coverage.md from the catalogues
 	$(PYTHON) scripts/gen_spec_coverage.py
 
+conformance-doc: ## Regenerate docs/conformance.md from the requirement registry
+	$(PYTHON) scripts/gen_conformance.py
+
+conformance: ## Report conformance, non-zero while mandatory gaps remain
+	$(PYTHON) -m pytest tests/test_conformance_registry.py tests/test_conformance_protocol.py
+	$(PYTHON) scripts/gen_conformance.py --check
+	-$(PYTHON) scripts/gen_conformance.py --strict
+
 check: lint types test-cov infra-lint privacy ## Everything CI runs
 	$(PYTHON) scripts/gen_spec_coverage.py --check
+	$(PYTHON) scripts/gen_conformance.py --check
 
 docker-build: ## Build the container image
 	docker build -t rcs-acs:local .

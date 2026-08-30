@@ -1,0 +1,95 @@
+# RCS settings exposed over OMA-DM.
+#
+# GSMA specifies RCS client configuration as an OMA-CP document (see
+# src/acs/catalog/omacp/base.yaml). This management object is the DM-side mirror
+# of the switches an operator most often needs to change *after* bootstrap,
+# without forcing a full re-provisioning cycle.
+#
+# It is an extension MO, not a GSMA-standardised one — the URN is namespaced
+# accordingly and every node is marked verified:false.
+meta:
+  id: rcs-ext
+  urn: urn:acs:mo:rcs-ext:1.0
+  root: ./RCS
+  title: RCS service switches (extension MO)
+  spec: Extension MO mirroring GSMA RCC.07 SERVICES
+
+nodes:
+  - uri: ./RCS
+    format: node
+    source: server
+    access: [Get, Add]
+    spec: Extension MO root
+    verified: false
+
+  - uri: ./RCS/Services/ChatAuth
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 SERVICES ChatAuth
+    verified: false
+
+  - uri: ./RCS/Services/GroupChatAuth
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 SERVICES GroupChatAuth
+    verified: false
+
+  - uri: ./RCS/Services/FtAuth
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 SERVICES ftAuth
+    verified: false
+
+  - uri: ./RCS/Services/StandaloneMsgAuth
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 SERVICES standaloneMsgAuth
+    verified: false
+
+  - uri: ./RCS/Services/ChatbotCommunicationAuth
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 SERVICES chatbotCommunicationAuth
+    verified: false
+
+  - uri: ./RCS/Messaging/MaxSizeFileTr
+    format: int
+    source: server
+    default: "10240"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 FT MaxSizeFileTr (KB)
+    verified: false
+
+  - uri: ./RCS/Messaging/ConfFctyURI
+    format: chr
+    source: server
+    default: "sip:conf-factory@{ims_domain}"
+    access: [Get, Replace]
+    feature: rcs
+    spec: RCC.07 CHAT ConfFctyURI
+    verified: false
+
+  - uri: ./RCS/Config/ProvisioningVersion
+    format: int
+    source: server
+    default: "{provisioning_version}"
+    access: [Get, Replace]
+    feature: rcs
+    spec: Mirrors the OMA-CP VERS/version currently applied
+    verified: false

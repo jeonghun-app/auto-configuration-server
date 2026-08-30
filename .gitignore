@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Local state / secrets — never commit
+.env
+*.pem
+*.key
+.deploy/
+*.local.json
+acs-sim-state.json
+dynamodb-local-data/

@@ -1,0 +1,912 @@
+# GSMA RCS provisioning parameter catalogue — base set.
+#
+# Every parameter the ACS can emit is declared here exactly once.
+#
+#   path      slash-separated characteristic path. A leading "APPLICATION:<id>"
+#             selects the APPLICATION characteristic carrying that AppID.
+#   parm      parameter name, spelled as the specification spells it. Casing is
+#             NOT normalised: clients compare these names exactly.
+#   type      chr | int | bool01 | enum
+#   default   value, may contain {placeholders} resolved per subscriber
+#   spec      informative reference
+#   verified  true only when the entry has been cross-checked against the
+#             pinned specification edition (see docs/spec-coverage.md)
+#
+# Placeholders: {imsi} {msisdn} {msisdn_national} {mcc} {mnc} {ims_domain}
+#               {impi} {impu} {device_id} {acs_host}
+#
+# NOTE ON HONESTY: entries marked verified:false are implemented from public
+# descriptions of RCC.07/RCC.14 and widely deployed operator configurations.
+# They are structurally correct and testable, but the repository does not claim
+# clause-level certification for them. See docs/spec-coverage.md.
+
+meta:
+  id: base
+  title: GSMA RCS base provisioning catalogue
+  spec: GSMA RCC.14 (Service Provider Device Configuration) + RCC.07 (RCS client)
+  oma_cp_version: "1.1"
+
+entries:
+
+  # ======================================================================
+  # ap2001 — IMS application (3GPP IMS Management Object, TS 24.167)
+  # ======================================================================
+  - path: APPLICATION:ap2001
+    parm: Name
+    type: chr
+    default: IMS Settings
+    spec: OMA-CP 1.1 / RCC.14 IMS application
+    verified: true
+    required: true
+    doc: Human readable application name.
+
+  - path: APPLICATION:ap2001
+    parm: Private_User_Identity
+    type: chr
+    default: "{impi}"
+    spec: 3GPP TS 24.167 5.2.2
+    verified: true
+    required: true
+    doc: IMPI derived from the IMSI.
+
+  - path: APPLICATION:ap2001
+    parm: Home_network_domain_name
+    type: chr
+    default: "{ims_domain}"
+    spec: 3GPP TS 24.167 5.2.4
+    verified: true
+    required: true
+
+  - path: APPLICATION:ap2001
+    parm: Authentication_Type
+    type: enum
+    values: ["EarlyIMS", "Digest", "AKA"]
+    default: AKA
+    spec: 3GPP TS 24.167 5.2.7
+    verified: true
+
+  - path: APPLICATION:ap2001
+    parm: UserName
+    type: chr
+    default: "{impi}"
+    spec: 3GPP TS 24.167 5.2.7.1
+    verified: false
+    doc: Digest username; only meaningful when Authentication_Type is Digest.
+
+  - path: APPLICATION:ap2001
+    parm: Timer_T1
+    type: int
+    unit: ms
+    default: "2000"
+    spec: 3GPP TS 24.167 5.2.9
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: Timer_T2
+    type: int
+    unit: ms
+    default: "16000"
+    spec: 3GPP TS 24.167 5.2.10
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: Timer_T4
+    type: int
+    unit: ms
+    default: "17000"
+    spec: 3GPP TS 24.167 5.2.11
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: Phone_Context
+    type: chr
+    default: "{ims_domain}"
+    spec: 3GPP TS 24.167 5.2.13
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: PDP_ContextOperPref
+    type: bool01
+    default: "0"
+    spec: 3GPP TS 24.167 5.2.8
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: Resource_Allocation_Mode
+    type: bool01
+    default: "0"
+    spec: 3GPP TS 24.167 5.2.12
+    verified: false
+
+  - path: APPLICATION:ap2001
+    parm: Voice_Domain_Preference_E_UTRAN
+    type: enum
+    values: ["1", "2", "3", "4"]
+    default: "3"
+    spec: 3GPP TS 24.167 5.2.16 (VoLTE domain selection)
+    verified: false
+    doc: 1 CS only, 2 IMS PS preferred, 3 CS voice preferred/IMS secondary, 4 IMS only.
+
+  - path: APPLICATION:ap2001
+    parm: SMS_Over_IP_Networks_Indication
+    type: bool01
+    default: "1"
+    spec: 3GPP TS 24.167 5.2.17
+    verified: false
+    doc: SMS over IMS (SMSoIP) — required for a full VoLTE profile.
+
+  - path: APPLICATION:ap2001
+    parm: Keep_Alive_Enabled
+    type: bool01
+    default: "1"
+    spec: 3GPP TS 24.167 5.2.18
+    verified: false
+
+  - path: APPLICATION:ap2001/Public_User_Identity_List/Public_User_Identity
+    parm: Public_User_Identity
+    type: chr
+    default: "{impu}"
+    spec: 3GPP TS 24.167 5.2.3
+    verified: true
+    required: true
+
+  - path: APPLICATION:ap2001/LBO_P-CSCF_Address
+    parm: Address
+    type: chr
+    default: "pcscf.{ims_domain}"
+    spec: 3GPP TS 24.167 5.2.5
+    verified: true
+    required: true
+
+  - path: APPLICATION:ap2001/LBO_P-CSCF_Address
+    parm: AddressType
+    type: enum
+    values: ["FQDN", "IPv4", "IPv6"]
+    default: FQDN
+    spec: 3GPP TS 24.167 5.2.6
+    verified: true
+
+  - path: APPLICATION:ap2001/ICSI_List/ICSI
+    parm: ICSI
+    type: chr
+    default: "urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel"
+    spec: 3GPP TS 24.167 5.2.14 (MMTEL / VoLTE communication service identifier)
+    verified: false
+
+  - path: APPLICATION:ap2001/Ext/GSMA
+    parm: AppRef
+    type: chr
+    default: IMS-Settings
+    spec: RCC.07 IMS/RCS application linkage
+    verified: false
+
+  - path: APPLICATION:ap2001/Ext/GSMA
+    parm: rcsVolteSingleRegistration
+    type: bool01
+    default: "1"
+    spec: RCC.07 Single Registration (RCS over VoLTE IMS registration)
+    verified: false
+    doc: 1 = RCS shares the VoLTE IMS registration instead of registering twice.
+
+  - path: APPLICATION:ap2001/Ext/NAT
+    parm: natUrlFmt
+    type: bool01
+    default: "0"
+    spec: RCC.07 NAT traversal
+    verified: false
+
+  - path: APPLICATION:ap2001/Ext/NAT
+    parm: intUrlFmt
+    type: bool01
+    default: "0"
+    spec: RCC.07 NAT traversal
+    verified: false
+
+  - path: APPLICATION:ap2001/Ext/NAT
+    parm: natKeepAliveTimeout
+    type: int
+    unit: s
+    default: "30"
+    spec: RCC.07 NAT keep-alive
+    verified: false
+
+  # ======================================================================
+  # ap2002 — RCS application (RCC.07 / Universal Profile)
+  # ======================================================================
+  - path: APPLICATION:ap2002
+    parm: Name
+    type: chr
+    default: RCS settings
+    spec: RCC.14 RCS application
+    verified: true
+    required: true
+
+  - path: APPLICATION:ap2002
+    parm: AppRef
+    type: chr
+    default: ap2001
+    spec: RCC.14 RCS -> IMS application reference
+    verified: true
+    required: true
+    doc: Links the RCS settings to the IMS application above.
+
+  # ---- SERVICES --------------------------------------------------------
+  - path: APPLICATION:ap2002/SERVICES
+    parm: presencePrfl
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: ChatAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES ChatAuth
+    verified: true
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: GroupChatAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES GroupChatAuth
+    verified: true
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: ftAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES ftAuth
+    verified: true
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: standaloneMsgAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES standaloneMsgAuth
+    verified: true
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: geolocPushAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES geolocPushAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: geolocPullAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES geolocPullAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: callComposerAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES callComposerAuth (Enriched Calling)
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: postCallAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES postCallAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: sharedMapAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES sharedMapAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: sharedSketchAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES sharedSketchAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: chatbotCommunicationAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES chatbotCommunicationAuth (UP 2.x chatbots)
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: plugInAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES plugInAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: videoCallAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES videoCallAuth (VoLTE video / ViLTE)
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: vsAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 SERVICES vsAuth (video share)
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: callUnansweredAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 SERVICES callUnansweredAuth
+    verified: false
+
+  # ---- MESSAGING / CHAT ------------------------------------------------
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: ChatAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: AutAccept
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT AutAccept
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: AutAcceptGroupChat
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT AutAcceptGroupChat
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: TimerIdle
+    type: int
+    unit: s
+    default: "300"
+    spec: RCC.07 CHAT TimerIdle
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: MaxSize
+    type: int
+    unit: byte
+    default: "8192"
+    spec: RCC.07 CHAT MaxSize
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: ConfFctyURI
+    type: chr
+    default: "sip:conf-factory@{ims_domain}"
+    spec: RCC.07 CHAT ConfFctyURI
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: ExploderURI
+    type: chr
+    default: "sip:exploder@{ims_domain}"
+    spec: RCC.07 CHAT ExploderURI
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: deferredMsgFuncUri
+    type: chr
+    default: "sip:deferred@{ims_domain}"
+    spec: RCC.07 CHAT deferredMsgFuncUri
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: MaxAdhocGroupSize
+    type: int
+    default: "100"
+    spec: RCC.07 CHAT MaxAdhocGroupSize
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: imCapAlwaysON
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT imCapAlwaysON
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: imWarnSF
+    type: bool01
+    default: "0"
+    spec: RCC.07 CHAT imWarnSF
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: imWarnIW
+    type: bool01
+    default: "0"
+    spec: RCC.07 CHAT imWarnIW
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: imSessionStart
+    type: enum
+    values: ["0", "1", "2"]
+    default: "2"
+    spec: RCC.07 CHAT imSessionStart
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: firstMsgInvite
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT firstMsgInvite
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: reportMsgDisposition
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT reportMsgDisposition
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: maxConcurrentSession
+    type: int
+    default: "10"
+    spec: RCC.07 CHAT maxConcurrentSession
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: GroupChatFullStandFwd
+    type: bool01
+    default: "1"
+    spec: RCC.07 CHAT GroupChatFullStandFwd
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/CHAT
+    parm: ChatRevokeTimer
+    type: int
+    unit: s
+    default: "60"
+    spec: RCC.07 CHAT ChatRevokeTimer
+    verified: false
+
+  # ---- MESSAGING / FT --------------------------------------------------
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftWarnSize
+    type: int
+    unit: KB
+    default: "1024"
+    spec: RCC.07 FT ftWarnSize
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: MaxSizeFileTr
+    type: int
+    unit: KB
+    default: "10240"
+    spec: RCC.07 FT MaxSizeFileTr
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftHTTPCSURI
+    type: chr
+    default: "https://ft.{ims_domain}/ft"
+    spec: RCC.07 FT ftHTTPCSURI
+    verified: true
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftHTTPDLURI
+    type: chr
+    default: "https://ft.{ims_domain}/dl"
+    spec: RCC.07 FT ftHTTPDLURI
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftHTTPFallback
+    type: bool01
+    default: "1"
+    spec: RCC.07 FT ftHTTPFallback
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftStAndFwEnabled
+    type: bool01
+    default: "1"
+    spec: RCC.07 FT ftStAndFwEnabled
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftThumb
+    type: bool01
+    default: "1"
+    spec: RCC.07 FT ftThumb
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftAutAccept
+    type: bool01
+    default: "1"
+    spec: RCC.07 FT ftAutAccept
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftMax1ToManyRecipients
+    type: int
+    default: "10"
+    spec: RCC.07 FT ftMax1ToManyRecipients
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftDefaultMech
+    type: enum
+    values: ["MSRP", "HTTP"]
+    default: HTTP
+    spec: RCC.07 FT ftDefaultMech
+    verified: true
+
+  # ---- MESSAGING / StandaloneMsg --------------------------------------
+  - path: APPLICATION:ap2002/MESSAGING/StandaloneMsg
+    parm: SwitchOverSize
+    type: int
+    unit: byte
+    default: "1300"
+    spec: RCC.07 StandaloneMsg SwitchOverSize
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/StandaloneMsg
+    parm: MaxSize1to1
+    type: int
+    unit: byte
+    default: "8192"
+    spec: RCC.07 StandaloneMsg MaxSize1to1
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/StandaloneMsg
+    parm: MaxSize1toMany
+    type: int
+    unit: byte
+    default: "8192"
+    spec: RCC.07 StandaloneMsg MaxSize1toMany
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/StandaloneMsg
+    parm: ConfFctyURI
+    type: chr
+    default: "sip:standalone-factory@{ims_domain}"
+    spec: RCC.07 StandaloneMsg ConfFctyURI
+    verified: false
+
+  # ---- MESSAGING / MessageStore ---------------------------------------
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreUrl
+    type: chr
+    default: "https://msgstore.{ims_domain}"
+    spec: RCC.07 Message Store
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreAuth
+    type: enum
+    values: ["0", "1", "2"]
+    default: "1"
+    spec: RCC.07 Message Store authentication
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreNotifUrl
+    type: chr
+    default: "https://msgstore.{ims_domain}/notify"
+    spec: RCC.07 Message Store notification
+    verified: false
+
+  # ---- MESSAGING / Chatbot (Universal Profile 2.x) --------------------
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: ChatbotDirectory
+    type: chr
+    default: "https://botdir.{ims_domain}"
+    spec: RCC.07 Chatbot directory
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: BotinfoFQDNRoot
+    type: chr
+    default: "botplatform.{ims_domain}"
+    spec: RCC.07 Chatbot botinfo
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: ChatbotMsgTech
+    type: enum
+    values: ["0", "1", "2"]
+    default: "2"
+    spec: RCC.07 Chatbot messaging technology
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: PrivacyDisable
+    type: bool01
+    default: "0"
+    spec: RCC.07 Chatbot privacy
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: SpamReportBotId
+    type: chr
+    default: "sip:spamreport@{ims_domain}"
+    spec: RCC.07 Chatbot spam reporting
+    verified: false
+
+  # ---- IM (legacy RCS 5.x IM characteristic) --------------------------
+  - path: APPLICATION:ap2002/IM
+    parm: imMsgTech
+    type: enum
+    values: ["0", "1"]
+    default: "1"
+    spec: RCC.07 IM messaging technology
+    verified: false
+
+  - path: APPLICATION:ap2002/IM
+    parm: imServiceAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 IM service authorisation
+    verified: false
+
+  # ---- CAPDISCOVERY ----------------------------------------------------
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: capInfoExpiry
+    type: int
+    unit: s
+    default: "86400"
+    spec: RCC.07 CAPDISCOVERY capInfoExpiry
+    verified: true
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: presenceDisc
+    type: bool01
+    default: "0"
+    spec: RCC.07 CAPDISCOVERY presenceDisc
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: defaultDisc
+    type: bool01
+    default: "1"
+    spec: RCC.07 CAPDISCOVERY defaultDisc
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: pollingPeriod
+    type: int
+    unit: s
+    default: "3600"
+    spec: RCC.07 CAPDISCOVERY pollingPeriod
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: capDiscCommonStack
+    type: bool01
+    default: "1"
+    spec: RCC.07 CAPDISCOVERY capDiscCommonStack
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: msgCapValidity
+    type: int
+    unit: s
+    default: "604800"
+    spec: RCC.07 CAPDISCOVERY msgCapValidity
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: nonRCSCapInfoExpiry
+    type: int
+    unit: s
+    default: "86400"
+    spec: RCC.07 CAPDISCOVERY nonRCSCapInfoExpiry
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: disableInitialAddressBookScan
+    type: bool01
+    default: "0"
+    spec: RCC.07 CAPDISCOVERY initial address book scan
+    verified: false
+
+  # ---- PRESENCE --------------------------------------------------------
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: usePresence
+    type: bool01
+    default: "0"
+    spec: RCC.07 PRESENCE usePresence
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: presencePrfl
+    type: bool01
+    default: "0"
+    spec: RCC.07 PRESENCE presencePrfl
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: AvailabilityAuth
+    type: bool01
+    default: "0"
+    spec: RCC.07 PRESENCE AvailabilityAuth
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: clientObjDataLimit
+    type: int
+    unit: byte
+    default: "16384"
+    spec: RCC.07 PRESENCE clientObjDataLimit
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: contentServerUri
+    type: chr
+    default: "https://presence.{ims_domain}/content"
+    spec: RCC.07 PRESENCE contentServerUri
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: sourceThrottlePublish
+    type: int
+    unit: s
+    default: "30"
+    spec: RCC.07 PRESENCE sourceThrottlePublish
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: maxNumbOfSubscInPresList
+    type: int
+    default: "100"
+    spec: RCC.07 PRESENCE maxNumbOfSubscInPresList
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: serviceAuthPolicy
+    type: enum
+    values: ["0", "1", "2"]
+    default: "0"
+    spec: RCC.07 PRESENCE serviceAuthPolicy
+    verified: false
+
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: publishTimer
+    type: int
+    unit: s
+    default: "3600"
+    spec: RCC.07 PRESENCE publishTimer
+    verified: false
+
+  # ---- XDMS ------------------------------------------------------------
+  - path: APPLICATION:ap2002/XDMS
+    parm: XCAPRootURI
+    type: chr
+    default: "https://xcap.{ims_domain}/xcap-root"
+    spec: RCC.07 XDMS XCAPRootURI
+    verified: false
+
+  - path: APPLICATION:ap2002/XDMS
+    parm: XCAPAuthenticationUserName
+    type: chr
+    default: "{impi}"
+    spec: RCC.07 XDMS XCAPAuthenticationUserName
+    verified: false
+
+  - path: APPLICATION:ap2002/XDMS
+    parm: XCAPAuthenticationType
+    type: enum
+    values: ["Digest", "GIBA", "Early-IMS"]
+    default: Digest
+    spec: RCC.07 XDMS XCAPAuthenticationType
+    verified: false
+
+  - path: APPLICATION:ap2002/XDMS
+    parm: RevokeTimer
+    type: int
+    unit: s
+    default: "60"
+    spec: RCC.07 XDMS RevokeTimer
+    verified: false
+
+  # ---- OTHER + TRANSPORTPROTO -----------------------------------------
+  - path: APPLICATION:ap2002/OTHER
+    parm: endUserConfReqId
+    type: chr
+    default: "sip:eucr@{ims_domain}"
+    spec: RCC.07 OTHER endUserConfReqId
+    verified: true
+
+  - path: APPLICATION:ap2002/OTHER
+    parm: deviceID
+    type: chr
+    default: "{device_id}"
+    spec: RCC.07 OTHER deviceID
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER
+    parm: WarnSizeImageShare
+    type: int
+    unit: KB
+    default: "1024"
+    spec: RCC.07 OTHER WarnSizeImageShare
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psSignalling
+    type: enum
+    values: ["SIPoUDP", "SIPoTCP", "SIPoTLS"]
+    default: SIPoTLS
+    spec: RCC.07 TRANSPORTPROTO psSignalling
+    verified: true
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psMedia
+    type: enum
+    values: ["MSRP", "MSRPoTLS"]
+    default: MSRPoTLS
+    spec: RCC.07 TRANSPORTPROTO psMedia
+    verified: true
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psRTMedia
+    type: enum
+    values: ["RTP", "SRTP"]
+    default: SRTP
+    spec: RCC.07 TRANSPORTPROTO psRTMedia
+    verified: true
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psSignallingRoaming
+    type: enum
+    values: ["SIPoUDP", "SIPoTCP", "SIPoTLS"]
+    default: SIPoTLS
+    spec: RCC.07 TRANSPORTPROTO roaming variant
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psMediaRoaming
+    type: enum
+    values: ["MSRP", "MSRPoTLS"]
+    default: MSRPoTLS
+    spec: RCC.07 TRANSPORTPROTO roaming variant
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psRTMediaRoaming
+    type: enum
+    values: ["RTP", "SRTP"]
+    default: SRTP
+    spec: RCC.07 TRANSPORTPROTO roaming variant
+    verified: false
+
+  # ---- APN -------------------------------------------------------------
+  - path: APPLICATION:ap2002/APN
+    parm: rcseOnlyAPN
+    type: chr
+    default: ""
+    spec: RCC.07 APN rcseOnlyAPN
+    verified: false
+
+  - path: APPLICATION:ap2002/APN
+    parm: enableRcseSwitch
+    type: bool01
+    default: "1"
+    spec: RCC.07 APN enableRcseSwitch
+    verified: false
+
+  # ---- Service provider extension -------------------------------------
+  - path: APPLICATION:ap2002/ServiceProviderExt
+    parm: acsHost
+    type: chr
+    default: "{acs_host}"
+    spec: Operator extension (informative)
+    verified: false
+    doc: Non-normative, lets a device report which ACS provisioned it.

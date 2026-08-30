@@ -1,0 +1,45 @@
+# GSMA Universal Profile 2.4 overlay.
+# Enables the chatbot and message-store feature set and prefers HTTP file
+# transfer with TLS transports throughout.
+meta:
+  id: UP_2.4
+  title: GSMA Universal Profile 2.4
+  rcs_version: "2.4"
+
+entries:
+  - path: APPLICATION:ap2002/SERVICES
+    parm: chatbotCommunicationAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 UP 2.4 chatbots
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: plugInAuth
+    type: bool01
+    default: "1"
+    spec: RCC.07 UP 2.4 plug-ins
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: ChatbotMsgTech
+    type: enum
+    values: ["0", "1", "2"]
+    default: "2"
+    spec: RCC.07 UP 2.4 chatbot messaging technology
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftDefaultMech
+    type: enum
+    values: ["MSRP", "HTTP"]
+    default: HTTP
+    spec: RCC.07 UP 2.4 prefers HTTP file transfer
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: capDiscCommonStack
+    type: bool01
+    default: "1"
+    spec: RCC.07 UP 2.4 common capability stack
+    verified: false

@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  python:
+    name: Lint, types and tests
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned to a commit SHA rather than a tag: a tag can be moved.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Formatting
+        run: ruff format --check src tests tools scripts
+
+      - name: Lint
+        run: ruff check src tests tools scripts
+
+      - name: Types (mypy --strict)
+        run: mypy
+
+      - name: Tests with coverage gate
+        run: |
+          pytest --cov=acs --cov-report=term-missing --cov-report=xml \
+                 --cov-fail-under=88
+
+      - name: Specification coverage document is current
+        run: python scripts/gen_spec_coverage.py --check
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  infra:
+    name: Infrastructure and scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install cfn-lint
+        run: pip install cfn-lint==1.22.3
+
+      - name: Validate CloudFormation
+        run: cfn-lint infra/ecr.yaml infra/app.yaml
+
+      - name: Shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck scripts/*.sh
+
+  privacy:
+    name: No committed secrets or real identifiers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Refuse committed credentials
+        run: |
+          set -euo pipefail
+          if git grep -nIE \
+              -e 'AWS_SECRET_ACCESS_KEY[[:space:]]*=[[:space:]]*[A-Za-z0-9/+]{20,}' \
+              -e 'BEGIN (RSA|EC|OPENSSH|PRIVATE) PRIVATE KEY' \
+              -e 'aws_secret_access_key[[:space:]]*=' \
+              -- . ':!.github/workflows/ci.yml'; then
+            echo "::error::possible credential committed"
+            exit 1
+          fi
+          echo "no credentials found"
+
+      - name: Refuse a committed .env
+        run: |
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env must not be committed"
+            exit 1
+          fi
+          echo ".env is not tracked"
+
+      - name: Subscriber identifiers must come from reserved test ranges
+        run: ./scripts/check_identifiers.sh
+
+  image:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Build
+        run: docker build -t rcs-acs:ci .
+
+      - name: Run and check liveness
+        run: |
+          set -euo pipefail
+          docker run -d --name acs-ci -p 8080:8080 \
+            -e ACS_ENV=dev \
+            -e ACS_STORE_BACKEND=memory \
+            -e ACS_SMS_PROVIDER=mock \
+            -e ACS_DEV_ENDPOINTS_ENABLED=true \
+            -e ACS_ADMIN_TOKEN=ci-admin-token \
+            -e ACS_DM_ACCOUNT_URI=http://localhost:8080/dm \
+            rcs-acs:ci
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then
+              echo "healthy"
+              break
+            fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/healthz
+          curl -fsS http://127.0.0.1:8080/readyz
+
+      - name: Container must not run as root
+        run: |
+          uid="$(docker exec acs-ci id -u)"
+          test "$uid" = "10001" || { echo "::error::running as uid $uid"; exit 1; }
+
+      - name: End-to-end verification against the container
+        run: |
+          pip install httpx==0.28.1
+          ACS_BASE_URL=http://127.0.0.1:8080 ACS_ADMIN_TOKEN=ci-admin-token \
+            python scripts/verify_stack.py
+
+      - name: Container logs must not contain raw identifiers
+        run: |
+          set -euo pipefail
+          if docker logs acs-ci 2>&1 | grep -E '001010000000001|821012345678|356938035643809'; then
+            echo "::error::a raw subscriber identifier reached the container logs"
+            exit 1
+          fi
+          echo "no raw identifiers in the logs"
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f acs-ci || true
+
+  dynamodb:
+    name: End-to-end against DynamoDB
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Start the stack
+        run: docker compose up --build -d acs
+
+      - name: Verify
+        run: |
+          pip install httpx==0.28.1
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8080/readyz
+          ACS_BASE_URL=http://127.0.0.1:8080 ACS_ADMIN_TOKEN=local-admin-token \
+            python scripts/verify_stack.py
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs --no-color | tail -200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true

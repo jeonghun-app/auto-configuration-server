@@ -1,0 +1,38 @@
+# Every 15- and 16-digit identifier that may appear in this repository.
+#
+# CI fails on any other one, because a 15-digit literal is most likely a real
+# IMSI and a real IMSI is subscriber-identifying data.
+#
+# Rules for adding an entry:
+#   * IMSIs should use MCC 001 / MNC 01, the reserved test network.
+#   * Where a real MCC is unavoidable — the MNC-length tests need one, since
+#     whether an MNC is 2 or 3 digits depends on the country — the MSIN must be
+#     obviously synthetic (zero-filled).
+#   * IMEIs come from documented example ranges and are not tied to a device.
+#
+# Format: one identifier per line. Comments and blank lines are ignored.
+
+# --- IMSIs, reserved test network (MCC 001, MNC 01) --------------------------
+001010000000001
+001010000000002
+001010000000003
+001010000000004
+001010000000009
+001010000000010
+001010000000011
+001019999999999
+001010000000000
+
+# --- IMSIs with a real MCC, used only to test MNC length ---------------------
+# 450 = Republic of Korea (2-digit MNC)
+450050000000001
+# 310 = United States, 302 = Canada (3-digit MNC)
+310260000000001
+302720000000001
+
+# --- IMEIs --------------------------------------------------------------------
+356938035643809
+356938035643800
+3569380356438091
+000000000000000
+35693803564380

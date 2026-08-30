@@ -1,0 +1,200 @@
+# 3GPP IMS management object (TS 24.167), instance 1.
+#
+# This is the VoLTE configuration surface. It intentionally mirrors the ap2001
+# OMA-CP application so that a device can be provisioned either way: OMA-CP at
+# RCS bootstrap, OMA-DM for ongoing management.
+#
+# Nodes gated with `feature: volte` are only pushed to subscribers whose record
+# has volte_enabled set.
+meta:
+  id: 3gpp-ims
+  urn: urn:oma:mo:ext-3gpp-ims:1.0
+  root: ./3GPP_IMS
+  title: 3GPP IMS / VoLTE settings
+  spec: 3GPP TS 24.167 IMS Management Object
+
+nodes:
+  - uri: ./3GPP_IMS
+    format: node
+    source: server
+    access: [Get, Add]
+    spec: 3GPP TS 24.167 5.1
+    verified: true
+
+  - uri: ./3GPP_IMS/1
+    format: node
+    source: server
+    access: [Get, Add, Replace]
+    spec: 3GPP TS 24.167 5.1 (interior node instance)
+    verified: true
+
+  - uri: ./3GPP_IMS/1/Private_User_Identity
+    format: chr
+    source: server
+    default: "{impi}"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.2
+    verified: true
+
+  - uri: ./3GPP_IMS/1/Public_User_Identity_List/1/Public_User_Identity
+    format: chr
+    source: server
+    default: "{impu}"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.3
+    verified: true
+
+  - uri: ./3GPP_IMS/1/Home_network_domain_name
+    format: chr
+    source: server
+    default: "{ims_domain}"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.4
+    verified: true
+
+  - uri: ./3GPP_IMS/1/LBO_P-CSCF_Address/1/Address
+    format: chr
+    source: server
+    default: "pcscf.{ims_domain}"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.5
+    verified: true
+
+  - uri: ./3GPP_IMS/1/LBO_P-CSCF_Address/1/AddressType
+    format: chr
+    source: server
+    default: FQDN
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.6
+    verified: true
+
+  - uri: ./3GPP_IMS/1/Authentication_Type
+    format: chr
+    source: server
+    default: AKA
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.7
+    verified: false
+
+  - uri: ./3GPP_IMS/1/PDP_ContextOperPref
+    format: bool
+    source: server
+    default: "false"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.8
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Timer_T1
+    format: int
+    source: server
+    default: "2000"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.9
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Timer_T2
+    format: int
+    source: server
+    default: "16000"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.10
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Timer_T4
+    format: int
+    source: server
+    default: "17000"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.11
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Resource_Allocation_Mode
+    format: bool
+    source: server
+    default: "false"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.12
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Phone_Context
+    format: chr
+    source: server
+    default: "{ims_domain}"
+    access: [Get, Replace]
+    spec: 3GPP TS 24.167 5.2.13
+    verified: false
+
+  - uri: ./3GPP_IMS/1/ICSI_List/1/ICSI
+    format: chr
+    source: server
+    default: "urn:urn-7:3gpp-service.ims.icsi.mmtel"
+    access: [Get, Replace]
+    feature: volte
+    spec: 3GPP TS 24.167 5.2.14 (MMTEL ICSI — VoLTE)
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Voice_Domain_Preference_E_UTRAN
+    format: int
+    source: server
+    default: "3"
+    access: [Get, Replace]
+    feature: volte
+    spec: 3GPP TS 24.167 (voice domain preference for E-UTRAN)
+    verified: false
+    doc: 1 CS only, 2 IMS PS preferred, 3 CS preferred, 4 IMS PS only.
+
+  - uri: ./3GPP_IMS/1/SMS_Over_IP_Networks_Indication
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: 3GPP TS 24.167 (SMS over IP)
+    verified: false
+    doc: SMSoIP — part of a complete VoLTE profile.
+
+  - uri: ./3GPP_IMS/1/Keep_Alive_Enabled
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: 3GPP TS 24.167 (SIP keep-alive)
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Ext/RCS/rcsVolteSingleRegistration
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: GSMA RCC.07 Single Registration
+    verified: false
+    doc: RCS shares the VoLTE IMS registration instead of registering separately.
+
+  - uri: ./3GPP_IMS/1/Ext/VoLTE/AMRWB_Enabled
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: Operator VoLTE extension (AMR-WB codec)
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Ext/VoLTE/VideoCallEnabled
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: Operator VoLTE extension (ViLTE)
+    verified: false
+
+  - uri: ./3GPP_IMS/1/Ext/VoLTE/EmergencyRegistration
+    format: bool
+    source: server
+    default: "true"
+    access: [Get, Replace]
+    feature: volte
+    spec: Operator VoLTE extension (emergency IMS registration)
+    verified: false

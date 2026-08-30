@@ -1,0 +1,47 @@
+# GSMA Universal Profile 1.0 overlay.
+# No chatbots, no plug-ins, no message store.
+meta:
+  id: UP_1.0
+  title: GSMA Universal Profile 1.0
+  rcs_version: "1.0"
+
+entries:
+  - path: APPLICATION:ap2002/SERVICES
+    parm: chatbotCommunicationAuth
+    remove: true
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: plugInAuth
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: ChatbotDirectory
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: BotinfoFQDNRoot
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: ChatbotMsgTech
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: PrivacyDisable
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/Chatbot
+    parm: SpamReportBotId
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreUrl
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreAuth
+    remove: true
+
+  - path: APPLICATION:ap2002/MESSAGING/MessageStore
+    parm: MsgStoreNotifUrl
+    remove: true

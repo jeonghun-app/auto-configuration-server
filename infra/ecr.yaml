@@ -1,0 +1,86 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Container registry for the GSMA RCS Auto Configuration Server. Kept in a
+  separate stack from the application so tearing the application down never
+  destroys the images it was running.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: rcs-acs
+    AllowedPattern: '^[a-z0-9][a-z0-9._/-]*$'
+    Description: ECR repository name.
+
+  UntaggedImageExpiryDays:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 365
+    Description: Days after which untagged images are removed.
+
+  MaxTaggedImages:
+    Type: Number
+    Default: 20
+    MinValue: 1
+    MaxValue: 1000
+    Description: Number of tagged images to retain.
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    # Retain deliberately: deleting the stack must not delete the image that a
+    # running service may still need to restart from.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      # Immutable tags mean a deployed digest cannot be swapped underneath a
+      # running task definition.
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: !Sub |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire untagged images",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": ${UntaggedImageExpiryDays}
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Retain a bounded number of tagged images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": ${MaxTaggedImages}
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Application
+          Value: rcs-acs
+
+Outputs:
+  RepositoryUri:
+    Description: Repository URI to push images to.
+    Value: !GetAtt Repository.RepositoryUri
+    Export:
+      Name: !Sub '${AWS::StackName}-RepositoryUri'
+
+  RepositoryArn:
+    Description: Repository ARN.
+    Value: !GetAtt Repository.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-RepositoryArn'

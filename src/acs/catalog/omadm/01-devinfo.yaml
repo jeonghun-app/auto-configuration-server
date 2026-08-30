@@ -1,0 +1,57 @@
+# OMA-DM DevInfo management object.
+# Read-only device identity that the client reports in Package 1 and that the
+# server may also Get explicitly.
+meta:
+  id: devinfo
+  urn: urn:oma:mo:oma-dm-devinfo:1.0
+  root: ./DevInfo
+  title: Device information
+  spec: OMA-DM Standardized Objects (DevInfo)
+
+nodes:
+  - uri: ./DevInfo
+    format: node
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo root
+    verified: true
+
+  - uri: ./DevInfo/DevId
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo DevId
+    verified: true
+    doc: Unique device identifier, commonly IMEI:<imei>.
+
+  - uri: ./DevInfo/Man
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo Man
+    verified: true
+    doc: Manufacturer.
+
+  - uri: ./DevInfo/Mod
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo Mod
+    verified: true
+    doc: Model name.
+
+  - uri: ./DevInfo/DmV
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo DmV
+    verified: true
+    doc: DM client version.
+
+  - uri: ./DevInfo/Lang
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevInfo Lang
+    verified: true
+    doc: Current device language (RFC 3066).

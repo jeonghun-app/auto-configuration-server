@@ -1,0 +1,79 @@
+# OMA-DM DevDetail management object.
+meta:
+  id: devdetail
+  urn: urn:oma:mo:oma-dm-devdetail:1.0
+  root: ./DevDetail
+  title: Device detail
+  spec: OMA-DM Standardized Objects (DevDetail)
+
+nodes:
+  - uri: ./DevDetail
+    format: node
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail root
+    verified: true
+
+  - uri: ./DevDetail/DevTyp
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail DevTyp
+    verified: true
+
+  - uri: ./DevDetail/OEM
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail OEM
+    verified: true
+
+  - uri: ./DevDetail/FwV
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail FwV
+    verified: true
+
+  - uri: ./DevDetail/SwV
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail SwV
+    verified: true
+
+  - uri: ./DevDetail/HwV
+    format: chr
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail HwV
+    verified: true
+
+  - uri: ./DevDetail/LrgObj
+    format: bool
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail LrgObj
+    verified: true
+    doc: Whether the client supports large object handling.
+
+  - uri: ./DevDetail/URI/MaxDepth
+    format: int
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail URI/MaxDepth
+    verified: true
+
+  - uri: ./DevDetail/URI/MaxTotLen
+    format: int
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail URI/MaxTotLen
+    verified: true
+
+  - uri: ./DevDetail/URI/MaxSegLen
+    format: int
+    source: device
+    access: [Get]
+    spec: OMA-DM DevDetail URI/MaxSegLen
+    verified: true

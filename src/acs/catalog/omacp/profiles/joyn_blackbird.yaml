@@ -1,0 +1,49 @@
+# Legacy RCS 5.1 "joyn blackbird" overlay.
+# Presence based capability discovery, MSRP file transfer, plaintext SIP/TCP.
+meta:
+  id: joyn_blackbird
+  title: joyn blackbird (RCS 5.1)
+  rcs_version: "5.1"
+
+entries:
+  - path: APPLICATION:ap2002/PRESENCE
+    parm: usePresence
+    type: bool01
+    default: "1"
+    spec: RCS 5.1 presence based discovery
+    verified: false
+
+  - path: APPLICATION:ap2002/CAPDISCOVERY
+    parm: presenceDisc
+    type: bool01
+    default: "1"
+    spec: RCS 5.1 presence discovery
+    verified: false
+
+  - path: APPLICATION:ap2002/MESSAGING/FT
+    parm: ftDefaultMech
+    type: enum
+    values: ["MSRP", "HTTP"]
+    default: MSRP
+    spec: RCS 5.1 MSRP file transfer
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psSignalling
+    type: enum
+    values: ["SIPoUDP", "SIPoTCP", "SIPoTLS"]
+    default: SIPoTCP
+    spec: RCS 5.1 transport
+    verified: false
+
+  - path: APPLICATION:ap2002/OTHER/TRANSPORTPROTO
+    parm: psMedia
+    type: enum
+    values: ["MSRP", "MSRPoTLS"]
+    default: MSRP
+    spec: RCS 5.1 transport
+    verified: false
+
+  - path: APPLICATION:ap2002/SERVICES
+    parm: chatbotCommunicationAuth
+    remove: true

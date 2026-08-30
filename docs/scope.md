@@ -104,7 +104,7 @@ See [limitations.md](limitations.md) for the full treatment. Summary:
 | VoLTE parameters manageable | yes | `src/acs/catalog/omadm/03-3gpp-ims.yaml`, DM push asserted in tests |
 | Container based | yes | `Dockerfile`, non-root, digest-pinned, read-only root filesystem |
 | Deployable on AWS with one command | yes | `scripts/deploy.sh`, `infra/*.yaml`, cfn-lint clean |
-| Tests written and passing | yes | 337 tests, 93% coverage |
+| Tests written and passing | yes | 338 tests, 93% coverage |
 | Correct operation verified | yes, locally | `scripts/verify_stack.py`: 32 checks against the container, with both the in-memory and DynamoDB backends |
 | Correct operation verified on AWS | not yet | Requires an AWS account and an owner decision on cost and exposure; the command is `scripts/deploy.sh` |
 | Every parameter cross-checked against a licensed spec edition | no | 25 of 116 OMA-CP parameters; see [spec-coverage.md](spec-coverage.md). Stated openly rather than claimed |

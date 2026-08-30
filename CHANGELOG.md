@@ -70,7 +70,7 @@ First release.
 
 ### Verification
 
-- 337 tests, 93% coverage, `mypy --strict` clean, `ruff` clean, `cfn-lint` clean.
+- 338 tests, 93% coverage, `mypy --strict` clean, `ruff` clean, `cfn-lint` clean.
 - Two client simulators (`tools/rcs_client_sim.py`, `tools/dm_client_sim.py`) that
   exit non-zero on a specification violation.
 - `scripts/verify_stack.py` — 32 checks end to end, including harvesting the OMA-DM

@@ -24,7 +24,7 @@ characteristic이 포함되므로, RCS 프로비저닝을 받은 단말은 곧�
 
 ```bash
 make install                 # .venv 생성 및 의존성 설치
-make test                    # 테스트 337개
+make test                    # 테스트 338개
 make docker-run              # 컨테이너 빌드 후 :8080 에서 실행
 make verify                  # 두 평면의 종단간 검증
 ```
@@ -216,7 +216,7 @@ make check      # lint + mypy strict + 커버리지 게이트 테스트 + cfn-li
 
 | 항목 | 결과 |
 | --- | --- |
-| `pytest` | 337 통과 |
+| `pytest` | 338 통과 |
 | 커버리지 | 93% |
 | `mypy --strict` | 소스 46개 파일 이상 없음 |
 | `ruff` (lint + format) | 이상 없음 |

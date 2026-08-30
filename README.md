@@ -26,7 +26,7 @@ Korean version of this document: [README.ko.md](README.ko.md).
 
 ```bash
 make install                 # create .venv and install dependencies
-make test                    # 337 tests
+make test                    # 338 tests
 make docker-run              # build and run the container on :8080
 make verify                  # end-to-end check of both planes
 ```
@@ -279,7 +279,7 @@ src/acs/
 tools/                       RCS and OMA-DM client simulators
 scripts/                     deploy, teardown, verify, seed, coverage generator
 infra/                       CloudFormation (ECR and application stacks)
-tests/                       337 tests
+tests/                       338 tests
 docs/                        scope, protocol, OMA-DM, AWS, limitations, ADRs
 ```
 
@@ -294,7 +294,7 @@ Current state, measured on this repository:
 
 | Check | Result |
 | --- | --- |
-| `pytest` | 337 passed |
+| `pytest` | 338 passed |
 | Coverage | 93% |
 | `mypy --strict` | clean, 46 source files |
 | `ruff` (lint + format) | clean |

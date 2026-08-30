@@ -34,5 +34,8 @@
 356938035643809
 356938035643800
 3569380356438091
+# All-zeros: used to prove a non-Luhn IMEI is still accepted, and as the id of
+# the console's XSS-payload test device.
 000000000000000
+000000000000001
 35693803564380

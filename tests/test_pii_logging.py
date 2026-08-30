@@ -167,34 +167,69 @@ def test_no_raw_identifier_appears_in_request_logs(
 
 
 def test_no_raw_identifier_appears_in_oma_dm_logs(
-    client: TestClient, capsys: pytest.CaptureFixture[str]
+    settings: Settings, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The DM SyncHdr source is IMEI-derived, so the session logs are a second
-    # place a device identifier can leak. CI caught exactly this once.
-    payload = f"""<?xml version="1.0" encoding="UTF-8"?>
+    """Drives an *authenticated* session, which is where the DM logging happens.
+
+    An earlier version of this test stopped at the authentication rejection and so
+    never reached the session logging. CI's container log scan caught the leak that
+    the weaker test missed — twice. The session key is namespaced by device id, so
+    it carries an identifier of its own.
+    """
+    import base64
+
+    from acs.app import create_app
+    from acs.domain.models import Subscriber
+    from acs.store.memory import MemoryStore
+
+    store = MemoryStore()
+    store.put_subscriber(Subscriber(imsi=TEST_IMSI, msisdn=TEST_MSISDN, dm_password="dm-secret"))
+    credential = base64.b64encode(f"{TEST_IMSI}:dm-secret".encode()).decode()
+
+    def package(msg_id: int, body: str) -> bytes:
+        return f"""<?xml version="1.0" encoding="UTF-8"?>
 <SyncML xmlns="SYNCML:SYNCML1.2">
   <SyncHdr>
-    <VerDTD>1.2</VerDTD>
-    <VerProto>DM/1.2</VerProto>
-    <SessionID>77</SessionID>
-    <MsgID>1</MsgID>
+    <VerDTD>1.2</VerDTD><VerProto>DM/1.2</VerProto>
+    <SessionID>77</SessionID><MsgID>{msg_id}</MsgID>
     <Target><LocURI>https://acs.example.com/dm</LocURI></Target>
     <Source><LocURI>IMEI:{TEST_IMEI}</LocURI><LocName>{TEST_IMSI}</LocName></Source>
+    <Cred>
+      <Meta>
+        <Format xmlns="syncml:metinf">b64</Format>
+        <Type xmlns="syncml:metinf">syncml:auth-basic</Type>
+      </Meta>
+      <Data>{credential}</Data>
+    </Cred>
+    <Meta><MaxMsgSize xmlns="syncml:metinf">16384</MaxMsgSize></Meta>
   </SyncHdr>
   <SyncBody>
-    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>
+{body}
     <Final/>
   </SyncBody>
 </SyncML>
 """.encode()
-    capsys.readouterr()
-    response = client.post(
-        "/dm", content=payload, headers={"Content-Type": "application/vnd.syncml.dm+xml"}
-    )
-    assert response.status_code == 200
-    output = capsys.readouterr().out
+
+    with TestClient(create_app(settings, store)) as dm_client:
+        capsys.readouterr()
+        headers = {"Content-Type": "application/vnd.syncml.dm+xml"}
+        first = dm_client.post(
+            "/dm",
+            content=package(1, "    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>"),
+            headers=headers,
+        )
+        assert first.status_code == 200
+        # Second package reaches the configuration push, which logs again.
+        dm_client.post(
+            "/dm",
+            content=package(2, "    <Results><CmdID>1</CmdID></Results>"),
+            headers=headers,
+        )
+        output = capsys.readouterr().out
+
     assert TEST_IMEI not in output
     assert TEST_IMSI not in output
+    assert "dm session init" in output, "the test must actually reach the session logging"
 
 
 def test_uvicorn_access_log_is_disabled(settings: Settings) -> None:

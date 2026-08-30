@@ -23,6 +23,10 @@ _SENSITIVE_KEYS: Final[frozenset[str]] = frozenset(
         "device",
         "device_id",
         "devid",
+        # The internal DM session key is namespaced by device id, so it carries
+        # one too.
+        "session",
+        "session_id",
         "otp",
         "token",
         "password",

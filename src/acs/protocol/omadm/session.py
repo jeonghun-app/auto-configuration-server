@@ -189,7 +189,7 @@ class DmService:
         log.info(
             "dm session init",
             extra={
-                "session": session.session_id,
+                "session": session.wire_session_id,
                 "device_id": session.device_id,
                 "gets": len(uris),
             },
@@ -219,7 +219,7 @@ class DmService:
         log.info(
             "dm configuration pushed",
             extra={
-                "session": session.session_id,
+                "session": session.wire_session_id,
                 "device_id": session.device_id,
                 "nodes": len(values),
                 "interior_nodes": len(interiors),
@@ -262,7 +262,7 @@ class DmService:
             log.warning(
                 "dm client reported command failures",
                 extra={
-                    "session": session.session_id,
+                    "session": session.wire_session_id,
                     "codes": [c.data for c in failures],
                 },
             )
@@ -329,7 +329,7 @@ class DmService:
         )
         log.info(
             "dm authentication rejected",
-            extra={"session": session.session_id, "reason": auth_result.reason},
+            extra={"session": session.wire_session_id, "reason": auth_result.reason},
         )
         return DmResponse(
             status_code=200,

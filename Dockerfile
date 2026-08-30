@@ -2,7 +2,7 @@
 #
 # Two-stage build. The base image is pinned by tag *and* digest so a rebuild is
 # reproducible and cannot silently pick up a different upstream image.
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS builder
+FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449eb9fd9df42f03e1b74b5b63 AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -21,7 +21,7 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir -r requirements.lock
 
 
-FROM python:3.11-slim-bookworm@sha256:0bee7276f83efd4a1ee05bbbf4281d95ed28e079220a9457f25a93e3f1e3c31b AS runtime
+FROM python:3.14-slim-bookworm@sha256:416f0db2a2b561945630cef9877a7ea0581b27449eb9fd9df42f03e1b74b5b63 AS runtime
 
 LABEL org.opencontainers.image.title="GSMA RCS Auto Configuration Server" \
       org.opencontainers.image.description="RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane" \

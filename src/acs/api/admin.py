@@ -8,11 +8,13 @@ cannot be administered by guessing one.
 from __future__ import annotations
 
 import hmac
+import time
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from acs.api.deps import AppState
+from acs.auth import token as token_mod
 from acs.domain.models import Subscriber
 from acs.observability import get_logger
 from acs.protocol import vers as vers_mod
@@ -209,6 +211,58 @@ def enable_subscriber(imsi: str, app_state: AppState = Depends(require_admin)) -
 def revoke_tokens(imsi: str, app_state: AppState = Depends(require_admin)) -> dict[str, int]:
     _load(app_state, imsi)
     return {"revoked": app_state.store.revoke_tokens_for_imsi(imsi)}
+
+
+class IssuedToken(BaseModel):
+    token: str
+    imsi: str
+    imei: str | None
+    expires_at: int
+
+
+@router.post("/subscribers/{imsi}/issue-token", response_model=IssuedToken)
+def issue_token(
+    imsi: str,
+    imei: str = Query(default="", description="Bind the token to this IMEI"),
+    app_state: AppState = Depends(require_admin),
+) -> IssuedToken:
+    """Mint a provisioning token for a subscriber, out of band.
+
+    Two legitimate uses:
+
+    * **Pre-provisioning.** An operator hands a device a token so it can fetch
+      configuration on first boot without an SMS round trip.
+    * **Verifying a deployment.** The OTP flow needs a real SMS, and the mock
+      outbox does not exist outside development. This lets
+      ``scripts/verify_stack.py`` exercise the whole configuration path against a
+      staging or production deployment without spending money on SMS.
+
+    The token is returned once and only its digest is stored, exactly as for a
+    token issued through the normal flow. It is bound to the IMSI and, when
+    ``imei`` is supplied, to that handset.
+    """
+    subscriber = _load(app_state, imsi)
+    if not subscriber.entitled:
+        raise HTTPException(status_code=409, detail="subscriber is not entitled")
+
+    settings = app_state.settings
+    token = token_mod.issue_token(
+        store=app_state.store,
+        imsi=subscriber.imsi,
+        imei=imei or None,
+        ttl_seconds=settings.token_ttl_seconds,
+        bind_imei=settings.token_bind_imei and bool(imei),
+    )
+    log.info(
+        "provisioning token issued out of band",
+        extra={"imsi": imsi, "imei": imei or None, "bound": bool(imei)},
+    )
+    return IssuedToken(
+        token=token,
+        imsi=subscriber.imsi,
+        imei=imei or None,
+        expires_at=int(time.time()) + settings.token_ttl_seconds,
+    )
 
 
 @router.get("/devices")

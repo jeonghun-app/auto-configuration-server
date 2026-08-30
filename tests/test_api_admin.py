@@ -152,6 +152,87 @@ def test_revoke_tokens_endpoint_reports_a_count(
     assert response.json()["revoked"] >= 1
 
 
+def test_issued_token_provisions_without_an_otp(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    # This is what makes a staging or production deployment verifiable: the mock
+    # SMS outbox does not exist there, so the OTP cannot be read.
+    response = client.post(
+        f"/admin/subscribers/{TEST_IMSI}/issue-token",
+        params={"imei": TEST_IMEI},
+        headers=admin_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["imsi"] == TEST_IMSI
+    assert body["imei"] == TEST_IMEI
+    assert body["expires_at"] > 0
+    token = body["token"]
+    assert len(token) > 40
+
+    served = client.get("/config", params=base_query(token=token))
+    assert served.status_code == 200
+    assert b"wap-provisioningdoc" in served.content
+    assert b'value="ap2002"' in served.content
+
+
+def test_issued_token_is_bound_to_the_supplied_imei(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    token = client.post(
+        f"/admin/subscribers/{TEST_IMSI}/issue-token",
+        params={"imei": TEST_IMEI},
+        headers=admin_headers,
+    ).json()["token"]
+    other = client.get("/config", params=base_query(token=token, IMEI="356938035643800"))
+    assert other.status_code == 511
+
+
+def test_issued_token_without_an_imei_is_not_device_bound(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    token = client.post(
+        f"/admin/subscribers/{TEST_IMSI}/issue-token", headers=admin_headers
+    ).json()["token"]
+    served = client.get("/config", params=base_query(token=token, IMEI="356938035643800"))
+    assert served.status_code == 200
+
+
+def test_issue_token_requires_the_admin_api(client: TestClient) -> None:
+    assert client.post(f"/admin/subscribers/{TEST_IMSI}/issue-token").status_code == 401
+
+
+def test_issue_token_refuses_a_non_entitled_subscriber(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    client.put(
+        f"/admin/subscribers/{TEST_IMSI}",
+        headers=admin_headers,
+        json={"msisdn": TEST_MSISDN, "entitled": False},
+    )
+    response = client.post(f"/admin/subscribers/{TEST_IMSI}/issue-token", headers=admin_headers)
+    assert response.status_code == 409
+
+
+def test_issue_token_for_an_unknown_subscriber_is_404(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    assert (
+        client.post(
+            "/admin/subscribers/001019999999999/issue-token", headers=admin_headers
+        ).status_code
+        == 404
+    )
+
+
+def test_issued_token_is_revocable(client: TestClient, admin_headers: dict[str, str]) -> None:
+    token = client.post(
+        f"/admin/subscribers/{TEST_IMSI}/issue-token", headers=admin_headers
+    ).json()["token"]
+    client.post(f"/admin/subscribers/{TEST_IMSI}/revoke-tokens", headers=admin_headers)
+    assert client.get("/config", params=base_query(token=token)).status_code == 511
+
+
 def test_device_inventory_is_exposed(client: TestClient, admin_headers: dict[str, str]) -> None:
     complete_otp_flow(client)
     devices = client.get("/admin/devices", headers=admin_headers).json()

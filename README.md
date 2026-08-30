@@ -71,6 +71,10 @@ scripts/deploy.sh \
 
 The script builds the image, pushes it to ECR, deploys both stacks, waits for
 health, and runs the end-to-end verification against the live load balancer.
+`scripts/verify_stack.py` picks its own path: the full SMS OTP flow where the
+mock outbox is exposed, and a pre-issued token otherwise — because outside
+development there is no outbox to read the OTP from and driving a real SMS costs
+money.
 `scripts/teardown.sh` removes it again; the DynamoDB table, secrets and images are
 retained on purpose.
 
@@ -193,6 +197,7 @@ See [docs/oma-dm.md](docs/oma-dm.md).
 | `GET /readyz` | Readiness — store reachability and catalogue integrity |
 | `GET/PUT/DELETE /admin/subscribers…` | Subscriber administration |
 | `POST /admin/subscribers/{imsi}/invalidate\|disable\|enable\|revoke-tokens` | Operational actions |
+| `POST /admin/subscribers/{imsi}/issue-token` | Mint a provisioning token out of band: pre-provisioning, and verifying a deployment where the OTP cannot be read |
 | `GET /admin/devices` | Device inventory from RCC.14 parameters and DM DevInfo |
 | `GET /admin/coverage` | Live specification coverage |
 | `GET /dev/sms` | Mock SMS outbox — development only, refused in staging and production |
@@ -302,6 +307,7 @@ Current state, measured on this repository:
 | Container | builds, runs as UID 10001, `/healthz` 200 |
 | End-to-end (in-memory backend) | 32 checks passed |
 | End-to-end (DynamoDB backend, containerized) | 32 checks passed |
+| End-to-end (live AWS: ECS Fargate + ALB + DynamoDB) | 29 checks passed |
 
 ## Documentation
 

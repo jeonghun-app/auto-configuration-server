@@ -224,6 +224,7 @@ make check      # lint + mypy strict + 커버리지 게이트 테스트 + cfn-li
 | 컨테이너 | 빌드 성공, UID 10001로 실행, `/healthz` 200 |
 | 종단간 (인메모리 백엔드) | 32개 검사 통과 |
 | 종단간 (DynamoDB 백엔드, 컨테이너) | 32개 검사 통과 |
+| 종단간 (실제 AWS: ECS Fargate + ALB + DynamoDB) | 29개 검사 통과 |
 
 ## 라이선스
 

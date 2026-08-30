@@ -194,3 +194,48 @@ aws dynamodb restore-table-to-point-in-time --region $REGION \
 
 Restore to a new table, verify, then repoint `ACS_TABLE_NAME`. Do not restore over
 a live table.
+
+## A first deployment rolled back and will not retry
+
+If the very first `CREATE` of `rcs-acs-app` fails, CloudFormation rolls back — but
+the DynamoDB table carries `DeletionPolicy: Retain`, so it **survives the
+rollback**. The retry then fails early validation with
+`AWS::EarlyValidation::ResourceExistenceCheck`, because the stack is trying to
+create a table that already exists.
+
+That retain policy is correct (a stack deletion must never destroy subscriber
+data), so the recovery is manual and deliberate:
+
+```bash
+REGION=us-east-1
+# 1. Confirm the retained table is genuinely empty before removing it.
+aws dynamodb scan --region $REGION --table-name rcs-acs-app-acs --select COUNT
+
+# 2. Delete the failed or REVIEW_IN_PROGRESS stack.
+aws cloudformation delete-stack --region $REGION --stack-name rcs-acs-app
+aws cloudformation wait stack-delete-complete --region $REGION --stack-name rcs-acs-app
+
+# 3. Only if the scan returned Count: 0.
+aws dynamodb delete-table --region $REGION --table-name rcs-acs-app-acs
+
+# 4. Retry; the image is already in ECR.
+scripts/deploy.sh --allowed-cidr <cidr> --region $REGION --skip-build
+```
+
+If the scan returns anything other than zero, the table holds real subscriber
+state: do not delete it. Deploy the stack under a different `--stack-prefix`, or
+import the existing table into the new stack.
+
+## ECR is unreachable from the build host
+
+`aws ecr get-login-password` hanging with no output usually means the host's VPC
+has interface VPC endpoints for ECR in that region that the host cannot reach —
+the endpoint DNS resolves to a private address and TCP 443 is dropped:
+
+```bash
+getent hosts api.ecr.$REGION.amazonaws.com          # a 10.x address means an endpoint
+timeout 5 bash -c "cat </dev/null >/dev/tcp/api.ecr.$REGION.amazonaws.com/443"
+```
+
+Either fix the endpoint's security group, or build and push from a host with a
+route to ECR in the target region.

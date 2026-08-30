@@ -277,6 +277,81 @@ def scenario_full(sim: RcsClientSimulator, checker: Checker, msisdn: str) -> Non
     print("  (requires the admin API; skipped when no admin token is supplied)")
 
 
+def scenario_token(sim: RcsClientSimulator, checker: Checker, token: str) -> None:
+    """Provision using a pre-issued token instead of the SMS OTP flow.
+
+    This is how a deployment is verified where the OTP cannot be read: outside
+    development there is no mock SMS outbox, and driving a real SMS costs money
+    and needs an origination identity. The operator mints a token through the
+    admin API and the client presents it, which exercises the whole
+    configuration path — document generation, versioning, the DM bootstrap —
+    without touching the SMS provider.
+    """
+    print("\n[1] configuration request with a pre-issued token")
+    sim.state["token"] = token
+    sim.state["version"] = 0
+    response = sim.request_configuration()
+    if not checker.check(
+        response.status_code == 200, f"token accepted, got {response.status_code}"
+    ):
+        return
+    if not checker.check(bool(response.content), "configuration document returned"):
+        return
+
+    root = sim.parse_document(response.content)
+    version = sim.apply(root)
+    checker.check(version > 0, f"a valid configuration version was served, got {version}")
+    checker.check(sim.application(root, "ap2001") is not None, "IMS application (ap2001) present")
+    checker.check(sim.application(root, "ap2002") is not None, "RCS application (ap2002) present")
+
+    ims = sim.application(root, "ap2001")
+    if ims is not None:
+        impi = ims.find("parm[@name='Private_User_Identity']")
+        checker.check(
+            impi is not None and sim.imsi in (impi.get("value") or ""),
+            "IMPI derived from the IMSI",
+        )
+        checker.check(
+            ims.find("parm[@name='Voice_Domain_Preference_E_UTRAN']") is not None,
+            "VoLTE voice domain preference present",
+        )
+        checker.check(
+            ims.find("parm[@name='SMS_Over_IP_Networks_Indication']") is not None,
+            "SMSoIP indication present",
+        )
+
+    rcs = sim.application(root, "ap2002")
+    if rcs is not None:
+        checker.check(
+            rcs.find("characteristic[@type='MESSAGING']/characteristic[@type='CHAT']") is not None,
+            "MESSAGING/CHAT subtree present",
+        )
+        checker.check(
+            rcs.find("characteristic[@type='MESSAGING']/characteristic[@type='FT']") is not None,
+            "MESSAGING/FT subtree present",
+        )
+        checker.check(
+            rcs.find("characteristic[@type='OTHER']/characteristic[@type='TRANSPORTPROTO']")
+            is not None,
+            "OTHER/TRANSPORTPROTO subtree present",
+        )
+    checker.check(
+        sim.application(root, "w7") is not None,
+        "OMA-DM account (w7) bootstrapped in the CP document",
+    )
+
+    print("\n[2] revalidation with the version just applied")
+    response = sim.request_configuration()
+    checker.check(response.status_code == 200, "revalidation answered 200")
+    revalidated = sim.parse_document(response.content)
+    revalidated_version, _ = sim.read_vers(revalidated)
+    checker.check(revalidated_version == version, "server reports the same version")
+    checker.check(
+        sim.application(revalidated, "ap2002") is None,
+        "server sent a VERS-only document instead of re-provisioning everything",
+    )
+
+
 def scenario_disabled(sim: RcsClientSimulator, checker: Checker) -> None:
     print("\n[5] operator disabled the subscriber")
     response = sim.request_configuration()

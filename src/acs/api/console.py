@@ -56,6 +56,7 @@ from acs.protocol import vers as vers_mod
 from acs.protocol.omacp.catalog import available_profiles, get_catalog
 from acs.protocol.omadm.motree import get_tree
 from acs.security.pii import normalise_msisdn
+from acs.specscope import load_families as load_spec_families
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/admin/ui", tags=["console"])
@@ -440,7 +441,11 @@ def subscriber_create(
     _check_csrf(csrf, cookie_csrf)
 
     imsi = imsi.strip()
-    normalised = normalise_msisdn(msisdn)
+    normalised = normalise_msisdn(
+        msisdn,
+        app_state.settings.default_country_code,
+        app_state.settings.national_trunk_prefix,
+    )
     if not imsi.isdigit() or not 5 <= len(imsi) <= 15:
         return _flash("/admin/ui/subscribers", "IMSI must be 5 to 15 digits.", True)
     if normalised is None:
@@ -663,7 +668,11 @@ def subscriber_update(
         raise HTTPException(status_code=404, detail="subscriber not found")
 
     destination = f"/admin/ui/subscribers/{quote(imsi)}"
-    normalised = normalise_msisdn(msisdn)
+    normalised = normalise_msisdn(
+        msisdn,
+        app_state.settings.default_country_code,
+        app_state.settings.national_trunk_prefix,
+    )
     if normalised is None:
         return _flash(destination, "That number is not valid E.164.", True)
 
@@ -1033,11 +1042,34 @@ def conformance_view(request: Request) -> Response:
             )
         )
 
+    pending = [f for f in load_spec_families() if f.blocks_assessment]
+    unassessed = ""
+    if pending:
+        unassessed = (
+            "<h3>Specification families not assessed</h3>"
+            '<p class="hint">Asked for, but the document is not held, so no '
+            "requirement can be stated. These deliberately carry no requirement "
+            "rows — a row would imply a requirement had been read.</p>"
+            + table(
+                ["Family", "Jurisdiction", "State", "What only the document can answer"],
+                [
+                    (
+                        f'<span class="mono">{esc(f.id)}</span><br>{esc(f.title)}',
+                        esc(f.jurisdiction),
+                        pill("not assessed", "bad"),
+                        "<br>".join(esc(q) for q in f.open_questions),
+                    )
+                    for f in pending
+                ],
+                caption=f"{len(pending)} family(ies) awaiting a document",
+            )
+        )
+
     body = (
         "<h2>Conformance</h2>"
         '<p class="hint">Requirement by requirement, for both specifications. '
         "Levels are this project&#39;s engineering judgement, not citations. "
         "<strong>Nothing here is certified</strong> and no real handset has been "
-        "tested.</p>" + "".join(sections)
+        "tested.</p>" + unassessed + "".join(sections)
     )
     return _render(request, app_state, csrf, "Conformance", body, "conformance")

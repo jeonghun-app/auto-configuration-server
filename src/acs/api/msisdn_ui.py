@@ -118,7 +118,11 @@ def msisdn_submit(
             status_code=400,
         )
 
-    normalised = normalise_msisdn(msisdn)
+    normalised = normalise_msisdn(
+        msisdn,
+        app_state.settings.default_country_code,
+        app_state.settings.national_trunk_prefix,
+    )
     if normalised is None:
         return _html(
             _page(
@@ -185,7 +189,11 @@ def msisdn_verify(
             status_code=400,
         )
 
-    normalised = normalise_msisdn(msisdn)
+    normalised = normalise_msisdn(
+        msisdn,
+        app_state.settings.default_country_code,
+        app_state.settings.national_trunk_prefix,
+    )
     if normalised is None or not otp.isalnum():
         return _html(
             _page("Enter your code", '<p class="error">Invalid submission.</p>'), status_code=400

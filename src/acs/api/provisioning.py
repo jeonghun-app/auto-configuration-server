@@ -49,6 +49,8 @@ async def handle_configuration_request(request: Request) -> Response:
             await _multi_items(request),
             user_agent=request.headers.get("user-agent", ""),
             max_value_length=settings.max_query_value_length,
+            default_country_code=settings.default_country_code,
+            national_trunk_prefix=settings.national_trunk_prefix,
         )
     except MalformedRequest as exc:
         app_state.metrics.emit("MalformedRequest", 1)

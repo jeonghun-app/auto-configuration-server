@@ -19,6 +19,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
 
 from acs.conformance import Requirement, RequirementSet, load_all  # noqa: E402
+from acs.specscope import SpecFamily, load_families  # noqa: E402
 
 OUTPUT = pathlib.Path(__file__).resolve().parents[1] / "docs" / "conformance.md"
 
@@ -101,11 +102,49 @@ def summary_table(sets: tuple[RequirementSet, ...]) -> list[str]:
         f"| **{len(gaps)}** |"
     )
     lines.append("")
+    pending = [f for f in load_families() if f.blocks_assessment]
     lines.append(
         f"**Overall: not fully conformant.** {len(gaps)} requirements this project "
-        "classifies as mandatory are not fully implemented. They are listed next, "
-        "and `scripts/gen_conformance.py --strict` exits non-zero because of them.\n"
+        "classifies as mandatory are not fully implemented, and "
+        f"{len(pending)} further specification families could not be assessed at all "
+        "because the documents are not held. Both are listed below, and "
+        "`scripts/gen_conformance.py --strict` exits non-zero for each reason "
+        "separately.\n"
     )
+    return lines
+
+
+def unassessed_section(families: tuple[SpecFamily, ...]) -> list[str]:
+    pending = [f for f in families if f.blocks_assessment]
+    lines = ["## Specification families not assessed\n"]
+    if not pending:
+        lines.append("None: every declared family has been assessed.\n")
+        return lines
+    lines.append(
+        "These were asked for and **cannot be assessed here, because the document is "
+        "not held**. They deliberately carry no requirement rows: a row would imply a "
+        "requirement had been read. Counting them separately keeps the numbers above "
+        "meaningful.\n"
+    )
+    for family in pending:
+        lines.append(f"### `{family.id}` — {family.title}\n")
+        lines.append(f"* Jurisdiction: {family.jurisdiction}")
+        lines.append("* State: **not assessed**, document not held")
+        lines.append(f"* Why in scope: {family.why_in_scope}")
+        lines.append(f"* How to obtain: {family.obtain_from}")
+        if family.publicly_knowable:
+            lines.append("* Knowable without the document:")
+            lines.extend(f"  * {item}" for item in family.publicly_knowable)
+        lines.append("* Only the document can answer:")
+        lines.extend(f"  * {item}" for item in family.open_questions)
+        if family.related_gaps:
+            lines.append(
+                "* Existing gaps an assessment would most likely touch: "
+                + ", ".join(f"`{gap}`" for gap in family.related_gaps)
+            )
+        if family.note:
+            lines.append(f"* Note: {family.note}")
+        lines.append("")
     return lines
 
 
@@ -150,8 +189,10 @@ def family_section(requirement_set: RequirementSet) -> list[str]:
 
 def render() -> str:
     sets = load_all()
+    families = load_families()
     lines: list[str] = [PREAMBLE]
     lines.extend(summary_table(sets))
+    lines.extend(unassessed_section(families))
     lines.extend(gap_section(sets))
     for requirement_set in sets:
         lines.extend(family_section(requirement_set))
@@ -177,6 +218,7 @@ def main(argv: list[str] | None = None) -> int:
 
     sets = load_all()
     gaps = [r for s in sets for r in s.requirements if r.blocks_conformance]
+    pending = [f for f in load_families() if f.blocks_assessment]
 
     if args.strict:
         total = sum(len(s.requirements) for s in sets)
@@ -184,12 +226,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"requirements: {total}, implemented: {implemented}, mandatory gaps: {len(gaps)}")
         for requirement in gaps:
             print(f"  {requirement.status:16} {requirement.id}: {requirement.title}")
+        if pending:
+            print(f"unassessed specification families: {len(pending)} (document not held)")
+            for family in pending:
+                print(f"  not-assessed     {family.id}: {family.title}")
+        # Two independent reasons, never summed into one number: a known-missing
+        # behaviour and an unread specification are not the same kind of thing.
+        reasons = []
         if gaps:
-            print(
-                f"\nSTRICT CONFORMANCE: FAIL — {len(gaps)} mandatory requirements are not "
-                "fully implemented.",
-                file=sys.stderr,
-            )
+            reasons.append(f"{len(gaps)} mandatory requirements are not fully implemented")
+        if pending:
+            reasons.append(f"{len(pending)} specification families are not assessed")
+        if reasons:
+            print("\nSTRICT CONFORMANCE: FAIL — " + "; ".join(reasons) + ".", file=sys.stderr)
             return 1
         print("\nSTRICT CONFORMANCE: PASS")
         return 0

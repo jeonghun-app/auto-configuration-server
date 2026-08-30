@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from acs.api.deps import AppState
 from acs.auth import token as token_mod
+from acs.config import get_settings
 from acs.conformance import load_all as load_conformance
 from acs.domain.models import Subscriber
 from acs.observability import get_logger
@@ -22,6 +23,7 @@ from acs.protocol import vers as vers_mod
 from acs.protocol.omacp.catalog import available_profiles, get_catalog
 from acs.protocol.omadm.motree import get_tree
 from acs.security.pii import normalise_msisdn
+from acs.specscope import load_families as load_spec_families
 
 log = get_logger(__name__)
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -58,7 +60,10 @@ class SubscriberIn(BaseModel):
     @field_validator("msisdn")
     @classmethod
     def _msisdn(cls, value: str) -> str:
-        normalised = normalise_msisdn(value)
+        settings = get_settings()
+        normalised = normalise_msisdn(
+            value, settings.default_country_code, settings.national_trunk_prefix
+        )
         if normalised is None:
             raise ValueError("msisdn must be a valid E.164 number")
         return normalised
@@ -329,9 +334,20 @@ def conformance(
     reported its successes would be the thing this registry exists to prevent.
     """
     families = load_conformance()
+    pending = [f for f in load_spec_families() if f.blocks_assessment]
     return {
         "certified": False,
         "specification_editions_pinned": False,
+        "unassessed_specification_families": [
+            {
+                "id": f.id,
+                "title": f.title,
+                "jurisdiction": f.jurisdiction,
+                "document_held": f.document_held,
+                "open_questions": list(f.open_questions),
+            }
+            for f in pending
+        ],
         "note": (
             "Levels are this project's engineering judgement, not citations. "
             "No GSMA or OMA certification is claimed, and no real handset has been "

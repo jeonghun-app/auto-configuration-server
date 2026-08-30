@@ -85,18 +85,51 @@ def redact_mapping(
     return out
 
 
-def normalise_msisdn(raw: str | None) -> str | None:
-    """Normalise an MSISDN towards E.164.
+def normalise_msisdn(
+    raw: str | None,
+    default_country_code: str = "",
+    national_trunk_prefix: str = "0",
+) -> str | None:
+    """Normalise an MSISDN to E.164, or return ``None`` if it cannot be.
 
-    Clients are inconsistent: some send ``+821012345678``, some send
-    ``821012345678``, and a badly encoded ``+`` arrives as a space. Only digits
-    are kept and a leading ``+`` is always added.
+    Clients and operators are inconsistent: some send ``+821012345678``, some
+    ``821012345678``, some the national form ``01012345678``, and a badly encoded
+    ``+`` arrives as a space.
+
+    Two rules that matter:
+
+    * **No E.164 number begins with zero.** A national form such as the Korean
+      ``01012345678`` previously normalised to ``+01012345678`` — a string that is
+      not a phone number, will never match a subscriber record, and would sit in
+      the database looking plausible. It is now rejected outright.
+    * With ``default_country_code`` configured, a national-format number is
+      converted instead of rejected: the trunk prefix is stripped and the country
+      code prepended, so ``01012345678`` becomes ``+821012345678`` when the
+      country code is ``82``. Without it the input is refused, because guessing a
+      country would silently provision the wrong subscriber.
     """
     if raw is None:
         return None
     cleaned = raw.strip().replace(" ", "+").replace("-", "")
-    cleaned = "+" + cleaned.lstrip("+")
-    digits = "+" + "".join(ch for ch in cleaned if ch.isdigit())
-    if not _MSISDN_RE.match(digits):
+    had_plus = cleaned.startswith("+")
+    digits = "".join(ch for ch in cleaned if ch.isdigit())
+    if not digits:
         return None
-    return digits
+
+    if (
+        not had_plus
+        and default_country_code
+        and national_trunk_prefix
+        and digits.startswith(national_trunk_prefix)
+        and not digits.startswith(default_country_code)
+    ):
+        digits = default_country_code + digits[len(national_trunk_prefix) :]
+
+    candidate = "+" + digits
+    if not _MSISDN_RE.match(candidate):
+        return None
+    if digits.startswith("0"):
+        # No country code begins with zero, so this is a national format we were
+        # not told how to interpret.
+        return None
+    return candidate

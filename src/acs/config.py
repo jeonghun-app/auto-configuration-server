@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     xml_content_type: str = "text/xml"
     max_query_value_length: int = 256
 
+    default_country_code: str = ""
+    """Country code, without "+", used to interpret a national-format MSISDN.
+
+    Empty means a national number is refused rather than guessed at: assuming a
+    country would silently provision the wrong subscriber. Set it to the
+    operator's country, e.g. 82 for the Republic of Korea, to accept
+    01012345678 as +821012345678."""
+    national_trunk_prefix: str = "0"
+    """Digit(s) stripped from a national-format number before the country code."""
+
     # ---- Provisioning policy ---------------------------------------------
     default_rcs_profile: str = "UP_2.4"
     provisioning_validity_seconds: int = 86400

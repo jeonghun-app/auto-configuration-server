@@ -137,6 +137,8 @@ class ProvisioningService:
             forwarded_for=headers.get("x-forwarded-for"),
             header_name=settings.enrichment_header_name,
             trusted_cidrs=settings.trusted_proxy_list,
+            default_country_code=settings.default_country_code,
+            national_trunk_prefix=settings.national_trunk_prefix,
         )
         if enriched.msisdn:
             subscriber = self._store.get_subscriber_by_msisdn(enriched.msisdn)

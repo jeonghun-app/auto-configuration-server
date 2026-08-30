@@ -72,6 +72,8 @@ def resolve_enriched_identity(
     forwarded_for: str | None,
     header_name: str,
     trusted_cidrs: Sequence[str],
+    default_country_code: str = "",
+    national_trunk_prefix: str = "0",
 ) -> EnrichmentResult:
     """Extract an enriched MSISDN, but only from a trusted peer."""
     if not trusted_cidrs:
@@ -97,7 +99,7 @@ def resolve_enriched_identity(
             value = value[len(prefix) :]
     value = value.split("@", 1)[0].split(";", 1)[0]
 
-    msisdn = normalise_msisdn(value)
+    msisdn = normalise_msisdn(value, default_country_code, national_trunk_prefix)
     if msisdn is None:
         return EnrichmentResult(None, True, "malformed_value")
     return EnrichmentResult(msisdn, True, "trusted")

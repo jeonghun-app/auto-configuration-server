@@ -52,7 +52,70 @@ It is generated and gated, not written:
 | GSMA RCC.14 Service Provider Device Configuration (ACS role) | 55 | 43 | 9 | 3 | 7 |
 | **Total** | **113** | **80** | **14** | **19** | **17** |
 
-**Overall: not fully conformant.** 17 requirements this project classifies as mandatory are not fully implemented. They are listed next, and `scripts/gen_conformance.py --strict` exits non-zero because of them.
+**Overall: not fully conformant.** 17 requirements this project classifies as mandatory are not fully implemented, and 3 further specification families could not be assessed at all because the documents are not held. Both are listed below, and `scripts/gen_conformance.py --strict` exits non-zero for each reason separately.
+
+## Specification families not assessed
+
+These were asked for and **cannot be assessed here, because the document is not held**. They deliberately carry no requirement rows: a row would imply a requirement had been read. Counting them separately keeps the numbers above meaningful.
+
+### `kr-tta-omadm` — TTA standard for OMA-DM based terminal management
+
+* Jurisdiction: Republic of Korea
+* State: **not assessed**, document not held
+* Why in scope: Requested directly: the server must match the TTA OMA-DM specification. The implementation here targets OMA DM 1.2 as published by the Open Mobile Alliance. A national standards body typically profiles such a specification — narrowing options, fixing values, and making optional features mandatory — so conformance to OMA DM 1.2 does not imply conformance to a national profile of it.
+* How to obtain: The TTA standards portal at tta.or.kr. Many Korean standards are downloadable without charge, and are frequently published in Korean only. Search for the terminal management standard and record its exact identifier and publication date in docs/scope.md before any row is written.
+* Knowable without the document:
+  * This server implements the client-initiated, XML-encoded subset of OMA DM 1.2, and its own gaps are already enumerated in the conformance registry.
+  * MCC 450 is the Republic of Korea and its operators use two-digit mobile network codes, which this server already resolves correctly.
+* Only the document can answer:
+  * Which TTA standard is meant, by exact identifier and publication date.
+  * Whether it profiles OMA DM 1.2 or a different version.
+  * Whether it makes the binary WBXML encoding mandatory.
+  * Whether it requires server-initiated sessions, and over which bearer.
+  * Whether it requires access control lists on the management tree.
+  * Whether it requires server-to-client authentication.
+  * Whether it requires the standardised DM account management object.
+  * Whether it defines Korean management objects beyond the standardised set.
+  * Which conformance test suite, if any, a device or server must pass.
+* Existing gaps an assessment would most likely touch: `OMADM-ENC-WBXML`, `OMADM-FLOW-NOTIFICATION`, `OMADM-TREE-ACL`, `OMADM-AUTH-SERVER-TO-CLIENT`, `OMADM-MO-DMACC`, `OMADM-SIZE-SPLITTING`
+* Note: The related_gaps list is where an assessment would most likely land, based on what national operator profiles usually require. That is expectation, not knowledge, and none of those gaps is currently closed.
+
+### `kr-mno-interworking` — Korean three-operator RCS interworking specification
+
+* Jurisdiction: Republic of Korea
+* State: **not assessed**, document not held
+* Why in scope: Requested directly: the server must match the three-operator interworking specification. The three Korean mobile network operators ran a joint RCS service, so an inter-operator agreement governing identities, service parameters, capability discovery and interworking almost certainly exists.
+* How to obtain: One of the three operators, or the joint body that maintains it. This is very likely a private inter-operator document available only under a non-disclosure agreement, and it is not obtainable by this project independently. The customer or partner operator has to supply it.
+* Knowable without the document:
+  * The three Korean operators offered a joint RCS messaging service, first under the joyn brand and later under a Korean brand name.
+  * Public statements have described the later Korean joint service as being built on the GSMA Universal Profile, which is the family this server already implements. Which Universal Profile release each operator deployed is not public.
+  * MCC 450 with two-digit network codes, and the +82 country code with a national trunk prefix that must be stripped for E.164. Both are handled.
+* Only the document can answer:
+  * Which document, maintained by whom, at which revision.
+  * Which Universal Profile release each operator requires.
+  * Which provisioning parameter values are fixed by agreement rather than left to each operator.
+  * How subscriber identity and the ACS address are resolved between operators.
+  * What capability discovery and interworking rules apply across the three networks.
+  * Which interoperability test cases must pass before a server is accepted.
+  * Whether messaging, file transfer or chatbot behaviour is constrained beyond the Universal Profile.
+* Existing gaps an assessment would most likely touch: `RCC14-REQ-PARAMETERS`, `RCC14-VERS-NEGATIVE`, `OMACP-DOC-SEMANTIC-VALIDATION`
+* Note: Until this document is available, the honest position is that this server implements the GSMA family the Korean service was reportedly built on, and that agreement-specific values remain unknown. Values must not be guessed: a wrong default served to a real handset disables a feature silently.
+
+### `kr-domestic-other` — Other Korean domestic specifications, not yet identified
+
+* Jurisdiction: Republic of Korea
+* State: **not assessed**, document not held
+* Why in scope: Requested as a category rather than a document: the server must match the specifications provided in Korea. That phrase can cover national standards, regulatory obligations on handling subscriber data, or an individual operator's own device and service specification. Which of those is meant has to be settled before anything can be assessed.
+* How to obtain: The requester, who must name the documents. National standards come from the TTA portal; regulatory obligations come from the relevant ministry and are a legal question rather than an engineering one; operator specifications come from the operator.
+* Knowable without the document:
+  * Korean law imposes obligations on the handling of personal and location data, and subscriber identifiers such as IMSI, IMEI and MSISDN fall within that. This server already masks or pseudonymises them in logs, keeps them out of metric dimensions, and leaves load balancer access logging off by default. Whether that satisfies a specific legal obligation is a question for a lawyer, not for this registry.
+  * AWS operates a region in Seoul, so data residency inside Korea is achievable by changing the deployment region. The default in the deployment script is already ap-northeast-2.
+* Only the document can answer:
+  * Which documents are meant, by name.
+  * Whether any of them constrain the wire protocol, as opposed to operations or data handling.
+  * Whether data residency inside Korea is required.
+  * Whether an accredited third party must certify the result, and against what.
+* Note: This entry exists so the category is not silently dropped. It will stay not-assessed until the documents are named.
 
 ## Mandatory gaps
 

@@ -78,6 +78,49 @@ def test_msisdn_normalisation_rejects_rubbish() -> None:
     assert normalise_msisdn("+821012345678") == "+821012345678"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    ["01012345678", "010-1234-5678", "0212345678", "0000000"],
+)
+def test_a_national_format_number_is_refused_without_a_country_code(raw: str) -> None:
+    """No E.164 number begins with zero.
+
+    A Korean national number such as 01012345678 previously normalised to
+    +01012345678: not a phone number, would never match a subscriber record, and
+    would sit in the database looking plausible.
+    """
+    assert normalise_msisdn(raw) is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("01012345678", "+821012345678"),
+        ("010-1234-5678", "+821012345678"),
+        ("0212345678", "+82212345678"),
+        # Already international: left alone rather than double-prefixed.
+        ("+821012345678", "+821012345678"),
+        ("821012345678", "+821012345678"),
+    ],
+)
+def test_a_national_number_is_converted_when_a_country_code_is_configured(
+    raw: str, expected: str
+) -> None:
+    assert normalise_msisdn(raw, default_country_code="82") == expected
+
+
+def test_a_configured_country_code_does_not_corrupt_another_country() -> None:
+    # An international number for a different country must survive untouched.
+    assert normalise_msisdn("+14155550123", default_country_code="82") == "+14155550123"
+
+
+def test_the_trunk_prefix_is_configurable() -> None:
+    assert normalise_msisdn("01012345678", "82", national_trunk_prefix="0") == "+821012345678"
+    # With no trunk prefix declared, a leading zero is still refused rather than
+    # silently treated as part of the subscriber number.
+    assert normalise_msisdn("01012345678", "82", national_trunk_prefix="") is None
+
+
 # ------------------------------------------------------------------ formatter
 def capture(logger_name: str, settings: Settings) -> tuple[logging.Logger, io.StringIO]:
     stream = io.StringIO()

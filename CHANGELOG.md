@@ -3,6 +3,51 @@
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] — 2026-08-30
+
+### Added
+
+- **Specification scope registry** (`src/acs/catalog/specscope/`). Three families
+  were raised — a TTA standard for OMA-DM based terminal management, the Korean
+  three-operator RCS interworking specification, and unnamed Korean domestic
+  specifications — and none of those documents is held, so none can be assessed.
+  They are recorded as `not-assessed` with what is publicly knowable, what only
+  the document can answer, and where to obtain it. They deliberately carry **no
+  requirement rows**: a row would imply a requirement had been read, and would put
+  guesses in the same table as 113 requirements that were actually read.
+- `--strict` now fails for two independent, separately named reasons — mandatory
+  gaps and unassessed families — never summed into one number.
+- The unassessed families are reported by `GET /admin/conformance`, by the console
+  conformance page, and in `docs/conformance.md`.
+- **An anti-fabrication gate.** The loader refuses citation-shaped text — a TTA
+  standard number, a clause or section number, an annex reference — while a
+  family's document is not held. Eight fabrication attempts are tested. The
+  promise not to invent Korean specification content is now enforced by the build.
+
+### Fixed
+
+- **A national-format MSISDN produced an invalid E.164 number.** The Korean
+  national form `01012345678` normalised to `+01012345678`: no country code begins
+  with zero, so that value is not a phone number, would never match a subscriber
+  record or an OTP challenge key, and would sit in the database looking plausible.
+  Reachable from the RCC.14 request parser, the public 511 recovery flow, the admin
+  API and the console. Such a number is now refused, and with
+  `ACS_DEFAULT_COUNTRY_CODE` set it is converted instead — `82` turns
+  `01012345678` into `+821012345678`. Empty by default, because guessing a country
+  would silently provision the wrong subscriber.
+
+### Deliberately not done
+
+- **No Korean operator profile overlay.** A profile overlay can contain nothing but
+  values served to handsets, and `available_profiles()` advertises any file
+  immediately in the console and as a valid `rcs_profile` on the wire. A file of
+  invented defaults would be worse than no file: a wrong `MaxSizeFileTr` or
+  `ftDefaultMech` breaks file transfer on a real handset silently.
+- **No new conformance status value.** Adding `unknown` to the status set would let
+  a future contributor mark a real OMA-DM requirement `unknown` and remove it from
+  the mandatory-gap count without editing the frozen list — a hole in the one gate
+  that prevents quiet downgrades.
+
 ## [1.2.0] — 2026-08-30
 
 ### Added

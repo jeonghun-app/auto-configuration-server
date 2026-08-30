@@ -448,6 +448,17 @@ def test_conformance_page_shows_gaps(console: TestClient) -> None:
     assert "Nothing here is certified" in body
 
 
+def test_conformance_page_shows_unassessed_specification_families(
+    console: TestClient,
+) -> None:
+    sign_in(console)
+    body = console.get(f"{CONSOLE}/conformance").text
+    assert "Specification families not assessed" in body
+    assert "kr-tta-omadm" in body
+    assert "kr-mno-interworking" in body
+    assert "the document is not held" in body
+
+
 # --------------------------------------------------------------------- XSS
 def test_values_reported_by_a_handset_are_escaped(
     console: TestClient, seeded_store: MemoryStore

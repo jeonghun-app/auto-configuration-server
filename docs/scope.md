@@ -34,6 +34,28 @@ RCC.07 and RCC.14 are licensed GSMA documents. This repository contains no
 specification text, and the honest statement of coverage is
 [spec-coverage.md](spec-coverage.md), which is generated from the catalogues.
 
+## Specification families raised but not assessed
+
+Three further families have been asked for and **cannot be assessed here, because
+the documents are not held**:
+
+| Family | State | Why |
+| --- | --- | --- |
+| TTA standard for OMA-DM based terminal management | not assessed | The document is not held. This server implements OMA DM 1.2 as published by the OMA; a national profile of it typically narrows options and makes optional features mandatory, so conformance to one does not imply the other |
+| Korean three-operator RCS interworking specification | not assessed | Very likely a private inter-operator document, obtainable only from an operator under agreement |
+| Other Korean domestic specifications | not assessed | Asked for as a category; the documents have not been named |
+
+They are recorded in `src/acs/catalog/specscope/korea.yaml` with what is publicly
+knowable, what only the document can answer, and where to obtain it. They
+deliberately carry **no requirement rows**: a row would imply a requirement had
+been read. `scripts/gen_conformance.py --strict` fails for this as a separately
+named reason, so it is never summed with the 17 known mandatory gaps.
+
+`src/acs/specscope.py` refuses citation-shaped text — a TTA standard number, a
+clause number, an annex reference — while a family's document is not held, and
+`tests/test_specscope.py` proves it with eight fabrication attempts. The rule
+against inventing specification content is enforced by the build.
+
 ## In scope
 
 **RCS configuration (OMA-CP over the RCC.14 HTTP flow)**
@@ -116,7 +138,7 @@ See [limitations.md](limitations.md) for the full treatment. Summary:
 | VoLTE parameters manageable | yes | `src/acs/catalog/omadm/03-3gpp-ims.yaml`, DM push asserted in tests |
 | Container based | yes | `Dockerfile`, non-root, digest-pinned, read-only root filesystem |
 | Deployable on AWS with one command | yes | `scripts/deploy.sh`, `infra/*.yaml`, cfn-lint clean |
-| Tests written and passing | yes | 456 tests, 93% coverage |
+| Tests written and passing | yes | 490 tests, 93% coverage |
 | Correct operation verified | yes, locally | `scripts/verify_stack.py`: 32 checks against the container, with both the in-memory and DynamoDB backends |
 | Correct operation verified on AWS | yes | Deployed to us-east-1 (ECS Fargate + ALB + DynamoDB + Secrets Manager) and verified live: 29 checks, no raw identifier in CloudWatch Logs, EMF metrics extracted into the `RcsAcs` namespace |
 | Every parameter cross-checked against a licensed spec edition | no | 25 of 116 OMA-CP parameters; see [spec-coverage.md](spec-coverage.md). Stated openly rather than claimed |

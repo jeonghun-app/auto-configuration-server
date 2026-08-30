@@ -162,6 +162,8 @@ def parse_config_query(
     params: Mapping[str, list[str]],
     user_agent: str = "",
     max_value_length: int = 256,
+    default_country_code: str = "",
+    national_trunk_prefix: str = "0",
 ) -> ConfigQuery:
     """Parse and validate the RCC.14 query string.
 
@@ -216,7 +218,9 @@ def parse_config_query(
             kwargs[field] = device_value
 
     if "msisdn" in raw:
-        normalised_msisdn = normalise_msisdn(raw["msisdn"])
+        normalised_msisdn = normalise_msisdn(
+            raw["msisdn"], default_country_code, national_trunk_prefix
+        )
         if normalised_msisdn is None:
             raise MalformedRequest("msisdn is not a valid E.164 number")
         kwargs["msisdn"] = normalised_msisdn

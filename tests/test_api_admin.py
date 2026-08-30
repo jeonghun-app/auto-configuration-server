@@ -269,6 +269,19 @@ def test_conformance_endpoint_requires_the_admin_api(client: TestClient) -> None
     assert client.get("/admin/conformance").status_code == 401
 
 
+def test_conformance_endpoint_reports_unassessed_specification_families(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    """Families we were asked about but whose documents we do not hold."""
+    body = client.get("/admin/conformance", headers=admin_headers).json()
+    pending = {f["id"]: f for f in body["unassessed_specification_families"]}
+    assert "kr-tta-omadm" in pending
+    assert "kr-mno-interworking" in pending
+    assert pending["kr-tta-omadm"]["document_held"] is False
+    # Each must say what only the document could answer.
+    assert pending["kr-tta-omadm"]["open_questions"]
+
+
 def test_subscriber_overrides_reach_the_document(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:

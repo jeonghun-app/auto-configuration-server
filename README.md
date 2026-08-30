@@ -26,7 +26,7 @@ Korean version of this document: [README.ko.md](README.ko.md).
 
 ```bash
 make install                 # create .venv and install dependencies
-make test                    # 456 tests
+make test                    # 490 tests
 make docker-run              # build and run the container on :8080
 make verify                  # end-to-end check of both planes
 ```
@@ -195,6 +195,20 @@ without evidence, when the frozen mandatory-gap list drifts in either direction,
 when a row uses compliance wording, or when the generated document goes stale.
 Each of those six was verified by deliberately breaking it.
 
+## Specification families not assessed
+
+Three families have been raised that this repository **cannot assess, because the
+documents are not held**: a TTA standard for OMA-DM based terminal management, the
+Korean three-operator RCS interworking specification, and Korean domestic
+specifications not yet named.
+
+They are declared in `src/acs/catalog/specscope/korea.yaml` and reported by
+`--strict`, `GET /admin/conformance` and the console — with no requirement rows,
+because a row would imply a requirement had been read. The loader refuses
+citation-shaped text while a document is not held, so no invented standard number
+or clause reference can enter the repository. See
+[docs/scope.md](docs/scope.md#specification-families-raised-but-not-assessed).
+
 ## Extending to OMA-DM and VoLTE
 
 The DM plane is driven by management object definitions in
@@ -276,6 +290,7 @@ All settings come from `ACS_`-prefixed environment variables; see
 | `ACS_GBA_ENABLED` | `false` | GBA needs a real BSF; enabled in production without one, the service fails closed rather than faking a bootstrap |
 | `ACS_DEV_ENDPOINTS_ENABLED` | `false` | The mock SMS outbox must never exist in production |
 | `ACS_PII_LOG_MODE` | `mask` | Subscriber identifiers are never logged in the clear |
+| `ACS_DEFAULT_COUNTRY_CODE` | *(empty)* | A national-format MSISDN is refused rather than guessed at; guessing a country would provision the wrong subscriber. Set `82` for Korea |
 | `ACS_STORE_BACKEND` | `memory` | Refused in staging/prod: in-memory OTP state breaks the moment there is more than one task |
 
 Startup validation refuses to boot on a configuration that would be unsafe for
@@ -343,7 +358,7 @@ src/acs/
 tools/                       RCS and OMA-DM client simulators
 scripts/                     deploy, teardown, verify, seed, coverage generator
 infra/                       CloudFormation (ECR and application stacks)
-tests/                       456 tests
+tests/                       490 tests
 docs/                        scope, protocol, OMA-DM, AWS, limitations, ADRs
 ```
 
@@ -358,7 +373,7 @@ Current state, measured on this repository:
 
 | Check | Result |
 | --- | --- |
-| `pytest` | 456 passed |
+| `pytest` | 490 passed |
 | Coverage | 93% |
 | `mypy --strict` | clean, 46 source files |
 | `ruff` (lint + format) | clean |

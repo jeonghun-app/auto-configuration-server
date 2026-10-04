@@ -106,7 +106,7 @@ now published from a tag, with a container image on GHCR.
   metric dimension or document changes.
 - Dependencies: fastapi 0.115.6 → 0.141.1 (Starlette 0.41.3 → 1.7.0), uvicorn
   0.34.0 → 0.54.0, pydantic 2.10.4 → 2.13.5, pydantic-settings 2.7.1 → 2.15.0,
-  lxml 5.3.0 → 6.1.2, boto3 1.35.90 → 1.43.106, PyYAML 6.0.2 → 6.0.3,
+  lxml 5.3.0 → 6.1.3, boto3 1.35.90 → 1.43.106, PyYAML 6.0.2 → 6.0.3,
   python-multipart 0.0.20 → 0.0.32. Development tools: pytest 9, pytest-cov 7,
   ruff 0.16, mypy 2.3, cfn-lint 1.57, moto 5.2. CI actions: checkout,
   setup-python and upload-artifact 7, each still pinned to a commit SHA.
@@ -157,9 +157,13 @@ now published from a tag, with a container image on GHCR.
   GHSA-v9pg-7xvm-68hf (CVE-2026-53540, low, negative `Content-Length` buffering).
   Starlette parses every form body with it, so the URL-encoded CPU DoS was
   reachable without authentication.
-- lxml 6.1 carries the upstream XXE fixes for `iterparse`. The SyncML parser sets
-  `resolve_entities`, `load_dtd` and `no_network` explicitly, and a new test puts
-  an entity reference in element text to show it stays unexpanded.
+- **lxml 6.1.3.** 6.1.3 fixes external parameter entities being parsed by
+  default when `resolve_entities="internal"` (LP#2165901), and 6.1 carries the
+  upstream XXE fixes for `iterparse`. Neither path was reachable here: both lxml
+  parsers set `resolve_entities=False`, `load_dtd` and `no_network` explicitly,
+  and a new test puts an entity reference in element text to show it stays
+  unexpanded. Taken anyway, so a later change to a parser option cannot reopen
+  them.
 - The SMSC's `message_id` is untrusted and could carry the MSISDN or the OTP. It
   is logged and audited only as a keyed digest (`smpp-<16 hex>`) whose key exists
   only in the process. SMPP errors name a `command_status` only from a fixed table

@@ -26,6 +26,15 @@ MAX_ELEMENTS: Final = 16384
 MAX_MB_UINT32_BYTES: Final = 5
 MAX_UINT32: Final = (1 << 32) - 1
 
+# Each received command can expand to a seven-element Status. Eight times the
+# request node budget leaves room for those statuses and catalogue commands.
+# Server XML also includes indentation and repeated references, so response
+# byte/depth budgets are separate from the untrusted input limits.
+MAX_ENCODE_XML_BYTES: Final = 32 * 1024 * 1024
+MAX_ENCODE_BYTES: Final = 16 * 1024 * 1024
+MAX_ENCODE_DEPTH: Final = 128
+MAX_ENCODE_ELEMENTS: Final = 8 * MAX_ELEMENTS
+
 SWITCH_PAGE: Final = 0x00
 END: Final = 0x01
 STR_I: Final = 0x03
@@ -295,9 +304,9 @@ class _TreeBuilder(ElementTree.TreeBuilder):
     def start(self, tag: str, attrs: dict[str, str]) -> ElementTree.Element:
         self.depth += 1
         self.elements += 1
-        if self.depth > MAX_DEPTH:
+        if self.depth > MAX_ENCODE_DEPTH:
             raise WbxmlError("WBXML nesting exceeds depth limit")
-        if self.elements > MAX_ELEMENTS:
+        if self.elements > MAX_ENCODE_ELEMENTS:
             raise WbxmlError("WBXML element count exceeds limit")
         if attrs:
             raise WbxmlError("WBXML attributes are not supported")
@@ -326,7 +335,7 @@ def encode(
     opaque: bool = False,
 ) -> bytes:
     """Encode XML, optionally sharing repeated strings or using OPAQUE text."""
-    if len(payload) > MAX_XML_BYTES:
+    if len(payload) > MAX_ENCODE_XML_BYTES:
         raise WbxmlError("XML input exceeds size limit")
     if version not in (VERSION_12, VERSION_13):
         raise WbxmlError("unsupported WBXML version")
@@ -368,7 +377,7 @@ def encode(
                 offsets[text] = len(table)
                 table.extend(text.encode() + b"\x00")
 
-    output = _Output(MAX_INPUT_BYTES)
+    output = _Output(MAX_ENCODE_BYTES)
     output.write(bytes([version]))
     output.write(b"\x00\x00" if isinstance(public_id, str) else _mb_uint32(public_id))
     output.write(_mb_uint32(CHARSET_UTF8) + _mb_uint32(len(table)) + table)

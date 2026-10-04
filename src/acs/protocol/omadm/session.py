@@ -24,6 +24,7 @@ from __future__ import annotations
 import dataclasses
 import time
 from collections.abc import Callable
+from copy import deepcopy
 
 from acs.config import Settings
 from acs.domain.models import Device, DmSession
@@ -69,6 +70,21 @@ class DmResponse:
     session_finished: bool = False
 
 
+@dataclasses.dataclass(slots=True)
+class _DmChanges:
+    session: DmSession | None = None
+    device: Device | None = None
+    delete_session_id: str = ""
+
+    def commit(self, store: Store) -> None:
+        if self.device is not None:
+            store.put_device(self.device)
+        if self.session is not None:
+            store.put_dm_session(self.session)
+        if self.delete_session_id:
+            store.delete_dm_session(self.delete_session_id)
+
+
 class DmService:
     """OMA-DM (SyncML DM 1.2) server."""
 
@@ -101,16 +117,25 @@ class DmService:
 
         try:
             message = parse_syncml(wbxml.decode(payload) if binary else payload)
-            outcome = self._handle_message(message)
-            if binary and outcome.body:
-                outcome.body = wbxml.encode(outcome.body, version=payload[0])
-                outcome.content_type = CONTENT_TYPE_WBXML
-            return outcome
         except (SyncMlParseError, wbxml.WbxmlError) as exc:
             log.warning("dm parse failure", extra={"error": str(exc)})
             return DmResponse(status_code=400, metric="DmProtocolError", detail=str(exc))
 
-    def _handle_message(self, message: SyncMlMessage) -> DmResponse:
+        changes = _DmChanges()
+        outcome = self._handle_message(message, changes)
+        if binary and outcome.body:
+            try:
+                outcome.body = wbxml.encode(outcome.body, version=payload[0])
+            except wbxml.WbxmlError as exc:
+                log.error("dm response encoding failure", extra={"error": str(exc)})
+                return DmResponse(
+                    status_code=500, metric="DmEncodingError", detail="response_encoding_failed"
+                )
+            outcome.content_type = CONTENT_TYPE_WBXML
+        changes.commit(self._store)
+        return outcome
+
+    def _handle_message(self, message: SyncMlMessage, changes: _DmChanges) -> DmResponse:
         header = message.header
         if not header.session_id or not header.msg_id:
             return DmResponse(
@@ -121,7 +146,9 @@ class DmService:
         # SessionID is chosen by the device and is commonly a small integer, so
         # keying on it alone lets two handsets share one server-side session.
         session_key = _session_key(device_id, header.session_id)
-        session = self._store.get_dm_session(session_key) or DmSession(
+        # MemoryStore returns live objects. Keep mutations private until the
+        # response is encoded so a failed response leaves the request retryable.
+        session = deepcopy(self._store.get_dm_session(session_key)) or DmSession(
             session_id=session_key,
             device_id=device_id,
             expires_at=int(time.time()) + self._settings.dm_session_ttl_seconds,
@@ -134,7 +161,7 @@ class DmService:
         if not auth_result.authenticated:
             session.nonce = auth_result.challenge_nonce
             session.authenticated = False
-            self._store.put_dm_session(session)
+            changes.session = session
             return self._unauthorised(message, session, auth_result)
 
         session.authenticated = True
@@ -146,7 +173,7 @@ class DmService:
             # The client is abandoning the session; acknowledge and drop the
             # state rather than continuing to push commands at it.
             builder = self._ack_only(message, session)
-            self._store.delete_dm_session(session.session_id)
+            changes.delete_session_id = session.session_id
             log.info("dm session aborted by client", extra={"session": session.session_id})
             return DmResponse(
                 status_code=200,
@@ -157,7 +184,7 @@ class DmService:
             )
 
         if message.has_alert(ALERT_END_OF_SESSION):
-            self._store.delete_dm_session(session.session_id)
+            changes.delete_session_id = session.session_id
             return DmResponse(
                 status_code=200,
                 body=self._ack_only(message, session).build(final=True),
@@ -167,13 +194,15 @@ class DmService:
             )
 
         if session.phase == "init":
-            return self._handle_init(message, session)
+            return self._handle_init(message, session, changes)
         if session.phase == "devinfo":
-            return self._handle_devinfo(message, session)
-        return self._handle_finish(message, session)
+            return self._handle_devinfo(message, session, changes)
+        return self._handle_finish(message, session, changes)
 
     # --------------------------------------------------------------- phases
-    def _handle_init(self, message: SyncMlMessage, session: DmSession) -> DmResponse:
+    def _handle_init(
+        self, message: SyncMlMessage, session: DmSession, changes: _DmChanges
+    ) -> DmResponse:
         if not (
             message.has_alert(ALERT_CLIENT_INITIATED_MGMT)
             or message.has_alert(ALERT_SERVER_INITIATED_MGMT)
@@ -184,14 +213,14 @@ class DmService:
                 detail="first package must carry Alert 1200 or 1201",
             )
 
-        self._absorb_device_values(message, session)
+        changes.device = self._absorb_device_values(message, session)
 
         builder = self._ack_only(message, session)
         uris = self._tree.device_query_uris()
         builder.get(uris)
         session.phase = "devinfo"
         session.server_cmd_id = builder.command_count
-        self._store.put_dm_session(session)
+        changes.session = session
 
         log.info(
             "dm session init",
@@ -208,8 +237,10 @@ class DmService:
             detail=f"get:{len(uris)}",
         )
 
-    def _handle_devinfo(self, message: SyncMlMessage, session: DmSession) -> DmResponse:
-        self._absorb_device_values(message, session)
+    def _handle_devinfo(
+        self, message: SyncMlMessage, session: DmSession, changes: _DmChanges
+    ) -> DmResponse:
+        changes.device = self._absorb_device_values(message, session)
 
         builder = self._ack_only(message, session)
         values = self._configuration_values(session)
@@ -221,7 +252,7 @@ class DmService:
         builder.add([(uri, "", "node", "node") for uri in interiors])
         builder.replace(values)
         session.phase = "configure"
-        self._store.put_dm_session(session)
+        changes.session = session
 
         log.info(
             "dm configuration pushed",
@@ -254,7 +285,9 @@ class DmService:
         declared = {n.uri for n in self._tree.all_nodes() if n.is_interior}
         return sorted(needed & declared, key=lambda u: (u.count("/"), u))
 
-    def _handle_finish(self, message: SyncMlMessage, session: DmSession) -> DmResponse:
+    def _handle_finish(
+        self, message: SyncMlMessage, session: DmSession, changes: _DmChanges
+    ) -> DmResponse:
         # 418 means the node was already there, which is the expected answer to an
         # Add of an interior node that the device already has. It is not a failure.
         tolerated = {STATUS_ALREADY_EXISTS}
@@ -264,7 +297,7 @@ class DmService:
             if command.data and not command.data.startswith("2") and command.data not in tolerated
         ]
         builder = self._ack_only(message, session)
-        self._store.delete_dm_session(session.session_id)
+        changes.delete_session_id = session.session_id
         if failures:
             log.warning(
                 "dm client reported command failures",
@@ -410,10 +443,10 @@ class DmService:
             )
         return builder
 
-    def _absorb_device_values(self, message: SyncMlMessage, session: DmSession) -> None:
+    def _absorb_device_values(self, message: SyncMlMessage, session: DmSession) -> Device:
         """Record ``Replace``/``Results`` values the device reported about itself."""
         device_id = session.device_id or "unknown"
-        device = self._store.get_device(device_id) or Device(device_id=device_id)
+        device = deepcopy(self._store.get_device(device_id)) or Device(device_id=device_id)
         if session.imsi:
             device.imsi = session.imsi
 
@@ -432,7 +465,7 @@ class DmService:
         device.dm_client_version = device.mo_values.get("./DevInfo/DmV", device.dm_client_version)
         device.sw_version = device.mo_values.get("./DevDetail/SwV", device.sw_version)
         device.last_seen_at = int(time.time())
-        self._store.put_device(device)
+        return device
 
     def _configuration_values(self, session: DmSession) -> list[tuple[str, str, str, str]]:
         """Build the ``Replace`` payload for the nodes the server owns."""

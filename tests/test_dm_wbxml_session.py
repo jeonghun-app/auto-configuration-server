@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from xml.etree import ElementTree
 
 import httpx
@@ -26,6 +27,7 @@ from acs.config import Settings
 from acs.domain.models import Subscriber
 from acs.protocol.omadm import auth as dm_auth
 from acs.protocol.omadm import syncml, wbxml
+from acs.protocol.omadm.session import DmService
 from acs.store.memory import MemoryStore
 
 pytestmark = pytest.mark.anyio
@@ -116,6 +118,143 @@ async def test_wbxml_requests_preserve_state_through_a_complete_dm_session(
     device = dm_store.get_device(TEST_IMEI)
     assert device is not None and device.sw_version == "SIM-1.0"
     assert device.imsi == TEST_IMSI
+
+
+async def test_six_thousand_replace_commands_receive_the_same_response_in_xml_and_wbxml(
+    settings: Settings, dm_store: MemoryStore
+) -> None:
+    body = "<Alert><CmdID>1</CmdID><Data>1201</Data></Alert>" + "".join(
+        f"<Replace><CmdID>{i}</CmdID></Replace>" for i in range(2, 6002)
+    )
+    xml = package(1, body, cred=basic_cred())
+    wire = wbxml.encode(xml)
+    assert len(wire) < 64 * 1024
+    # The equivalent XML request is larger than the default 64 KiB body cap.
+    large_settings = settings.model_copy(update={"dm_max_msg_size": 128 * 1024})
+    subscriber = dm_store.get_subscriber(TEST_IMSI)
+    assert subscriber is not None
+    responses: list[bytes] = []
+    for payload, content_type in (
+        (xml, syncml.CONTENT_TYPE_XML),
+        (wire, syncml.CONTENT_TYPE_WBXML),
+    ):
+        store = MemoryStore()
+        store.put_subscriber(deepcopy(subscriber))
+        app = create_app(large_settings, store)
+        async with (
+            app.router.lifespan_context(app),
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client,
+        ):
+            response = await client.post(
+                "/dm", content=payload, headers={"Content-Type": content_type}
+            )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == content_type
+        session = store.get_dm_session(SESSION_KEY)
+        assert session is not None and session.phase == "devinfo"
+        assert session.authenticated and session.last_msg_id == 1
+        assert store.get_device(TEST_IMEI) is not None
+        responses.append(response.content)
+
+    message = syncml.parse(responses[0])
+    statuses = message.of("Status")
+    assert len(statuses) == 6002
+    assert all(status.data == "200" for status in statuses[1:])
+    assert message.of("Get") and message.final
+    assert responses[1] == wbxml.encode(responses[0])
+
+
+@pytest.mark.parametrize(
+    "stage", ["challenge", "init", "devinfo", "configure", "abort", "end", "rejected"]
+)
+def test_wbxml_encoding_failure_preserves_session_and_device_state(
+    settings: Settings,
+    dm_store: MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    stage: str,
+) -> None:
+    service = DmService(settings, dm_store)
+    body = PACKAGE_1_BODY
+    credential = basic_cred()
+    msg_id = 1
+    if stage == "challenge":
+        credential = None
+    elif stage != "init":
+        assert service.handle(package(1, PACKAGE_1_BODY, cred=basic_cred())).status_code == 200
+        msg_id = 2
+        body = (
+            "<Results><CmdID>1</CmdID><Item><Source><LocURI>./DevDetail/SwV</LocURI>"
+            "</Source><Data>updated</Data></Item></Results>"
+        )
+        if stage == "configure":
+            assert service.handle(package(2, body, cred=basic_cred())).status_code == 200
+            body = "<Status><CmdID>1</CmdID><Data>200</Data></Status>"
+            msg_id = 3
+        elif stage in ("abort", "end"):
+            code = "1223" if stage == "abort" else "1226"
+            body = f"<Alert><CmdID>1</CmdID><Data>{code}</Data></Alert>"
+        elif stage == "rejected":
+            credential = basic_cred(password="wrong")
+
+    before_session = deepcopy(dm_store.get_dm_session(SESSION_KEY))
+    before_device = deepcopy(dm_store.get_device(TEST_IMEI))
+    wire = wbxml.encode(package(msg_id, body, cred=credential))
+    with monkeypatch.context() as patch:
+        patch.setattr(wbxml, "MAX_ENCODE_BYTES", 1)
+        outcome = service.handle(wire, syncml.CONTENT_TYPE_WBXML)
+
+    assert outcome.status_code == 500
+    assert outcome.metric == "DmEncodingError"
+    assert outcome.detail == "response_encoding_failed"
+    assert not outcome.body and not outcome.session_finished
+    assert dm_store.get_dm_session(SESSION_KEY) == before_session
+    assert dm_store.get_device(TEST_IMEI) == before_device
+    assert "dm response encoding failure" in caplog.messages
+    assert "dm parse failure" not in caplog.messages
+    assert service.handle(wire, syncml.CONTENT_TYPE_WBXML).status_code == 200
+
+
+@pytest.mark.spec
+@pytest.mark.parametrize("version", [b"\x02", b"\x03"])
+async def test_server_wbxml_response_matches_independent_header_status_and_metinf_bytes(
+    dm_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch, version: bytes
+) -> None:
+    monkeypatch.setattr(dm_auth, "make_nonce", lambda: "bm9uY2U=")
+    # The public SyncML/MetInf token tables define this vector independently of
+    # the codec, so matching encode/decode bugs cannot make the assertion pass.
+    wire = (
+        version + b"\xa4\x01\x6a\x00"
+        b"\x6d\x6c\x65\x031\x00\x01\x5b\x031\x00\x01\x01"
+        b"\x6b\x46\x4b\x031\x00\x01\x4f\x031201\x00\x01\x01\x12\x01\x01"
+    )
+    response = await dm_client.post(
+        "/dm", content=wire, headers={"Content-Type": "application/vnd.syncml.dm+wbxml"}
+    )
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/vnd.syncml.dm+wbxml"
+    assert response.content.startswith(
+        version + b"\xa4\x01\x6a\x00\x6d\x03\n  \x00\x6c\x03\n    \x00\x71\x031.2\x00\x01"
+    )
+    assert b"\x5a\x03\n      \x00\x00\x01\x4c\x0316384\x00\x01" in response.content
+    assert (
+        b"\x00\x00\x6b\x03\n    \x00\x69\x03\n      \x00"
+        b"\x4b\x031\x00\x01\x03\n      \x00"
+        b"\x5c\x031\x00\x01\x03\n      \x00"
+        b"\x4c\x030\x00\x01\x03\n      \x00"
+        b"\x4a\x03SyncHdr\x00\x01"
+    ) in response.content
+    assert (
+        b"\x00\x01\x47\x03b64\x00\x01"
+        b"\x03\n          \x00\x53\x03syncml:auth-basic\x00\x01"
+        b"\x03\n          \x00\x50\x03bm9uY2U=\x00\x01"
+    ) in response.content
+    assert b"\x00\x00\x4f\x03407\x00\x01" in response.content
+    assert response.content.endswith(
+        b"\x03\n    \x00\x01\x03\n    \x00\x12\x03\n  \x00\x01\x03\n\x00\x01"
+    )
 
 
 @pytest.mark.spec

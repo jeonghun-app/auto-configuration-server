@@ -214,8 +214,24 @@ def test_wbxml_nesting_is_bounded_in_both_directions() -> None:
     excessive_wire = HEADER + b"\x6d" + b"\x54" * wbxml.MAX_DEPTH
     with pytest.raises(wbxml.WbxmlError, match="depth limit"):
         wbxml.decode(excessive_wire)
+    response_xml = (
+        b"<SyncML>"
+        + b"<Item>" * (wbxml.MAX_ENCODE_DEPTH - 1)
+        + b"</Item>" * (wbxml.MAX_ENCODE_DEPTH - 1)
+        + b"</SyncML>"
+    )
+    assert wbxml.encode(response_xml) == (
+        HEADER
+        + b"\x6d"
+        + b"\x54" * (wbxml.MAX_ENCODE_DEPTH - 2)
+        + b"\x14"
+        + b"\x01" * (wbxml.MAX_ENCODE_DEPTH - 1)
+    )
     excessive_xml = (
-        b"<SyncML>" + b"<Item>" * wbxml.MAX_DEPTH + b"</Item>" * wbxml.MAX_DEPTH + b"</SyncML>"
+        b"<SyncML>"
+        + b"<Item>" * wbxml.MAX_ENCODE_DEPTH
+        + b"</Item>" * wbxml.MAX_ENCODE_DEPTH
+        + b"</SyncML>"
     )
     with pytest.raises(wbxml.WbxmlError, match="depth limit"):
         wbxml.encode(excessive_xml)
@@ -227,8 +243,12 @@ def test_wbxml_element_count_is_bounded_in_both_directions() -> None:
     assert wbxml.encode(xml) == wire
     with pytest.raises(wbxml.WbxmlError, match="element count"):
         wbxml.decode(wire[:-1] + b"\x12\x01")
+    response_xml = b"<SyncML>" + b"<Final/>" * (wbxml.MAX_ENCODE_ELEMENTS - 1) + b"</SyncML>"
+    assert wbxml.encode(response_xml) == (
+        HEADER + b"\x6d" + b"\x12" * (wbxml.MAX_ENCODE_ELEMENTS - 1) + b"\x01"
+    )
     with pytest.raises(wbxml.WbxmlError, match="element count"):
-        wbxml.encode(xml.replace(b"</SyncML>", b"<Final/></SyncML>"))
+        wbxml.encode(response_xml.replace(b"</SyncML>", b"<Final/></SyncML>"))
 
 
 def expansion_bomb() -> bytes:
@@ -251,9 +271,9 @@ def test_repeated_string_table_references_cannot_exhaust_memory() -> None:
 
 def test_the_encoder_bounds_xml_input_and_wbxml_output() -> None:
     with pytest.raises(wbxml.WbxmlError, match="XML input exceeds size"):
-        wbxml.encode(b"x" * (wbxml.MAX_XML_BYTES + 1))
+        wbxml.encode(b"x" * (wbxml.MAX_ENCODE_XML_BYTES + 1))
     with pytest.raises(wbxml.WbxmlError, match="output exceeds size"):
-        wbxml.encode(b"<SyncML><Data>" + b"x" * wbxml.MAX_INPUT_BYTES + b"</Data></SyncML>")
+        wbxml.encode(b"<SyncML><Data>" + b"x" * wbxml.MAX_ENCODE_BYTES + b"</Data></SyncML>")
 
 
 @pytest.mark.parametrize(

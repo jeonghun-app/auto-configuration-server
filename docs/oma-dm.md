@@ -119,6 +119,14 @@ expansion from repeated string-table references. At the HTTP boundary, bodies
 are read with a 512 KiB cap and the existing `ACS_DM_MAX_MSG_SIZE * 4` cap still
 applies (64 KiB by default); exceeding either body cap returns `413`.
 
+Server responses have separate encoding limits: 128 element levels, 131,072
+elements, 32 MiB of source XML and 16 MiB of WBXML. These allow a compact request
+with many commands to expand into acknowledgements and catalogue commands.
+Session and device changes are saved only after the response is encoded. An
+encoding failure returns HTTP `500` with the `DmEncodingError` metric and leaves
+the stored state unchanged, allowing the client to retry. These resource limits
+do not implement response splitting to satisfy a client's `MaxMsgSize`.
+
 Basic and nonce-based MD5 credentials are checked after decoding, exactly as for
 XML. The current DM authentication implementation does not calculate a MAC or
 HMAC over the HTTP body in either encoding.

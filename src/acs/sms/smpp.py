@@ -28,6 +28,9 @@ destination number.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import hmac
+import secrets
 import socket
 import ssl
 import struct
@@ -97,6 +100,7 @@ _MAX_SYSTEM_ID: Final = 16
 _MAX_PASSWORD: Final = 9
 _MAX_SYSTEM_TYPE: Final = 13
 _MAX_ADDR: Final = 21
+_MAX_MESSAGE_ID: Final = 65
 
 
 class SmppError(SmsDeliveryFailed):
@@ -129,14 +133,6 @@ def c_octet(value: str, max_length: int, field: str) -> bytes:
     if b"\x00" in raw or len(raw) + 1 > max_length:
         raise ValueError(f"SMPP {field} must be at most {max_length - 1} characters")
     return raw + b"\x00"
-
-
-def read_c_octet(body: bytes, offset: int = 0) -> tuple[str, int]:
-    """Decode a C-Octet String at ``offset``, returning it and the next offset."""
-    end = body.find(b"\x00", offset)
-    if end < 0:
-        raise SmppError("SMPP response field is not NUL-terminated")
-    return body[offset:end].decode("ascii", errors="replace"), end + 1
 
 
 def encode_short_message(request: SmsRequest, source_port: int = 0) -> tuple[int, int, bytes]:
@@ -301,6 +297,7 @@ class SmppSmsSender:
         self._tls_ca_file = tls_ca_file
         self._timeout = timeout
         self._store = store
+        self._reference_key = secrets.token_bytes(32)
 
     def __repr__(self) -> str:
         return f"SmppSmsSender(host={self._host!r}, port={self._port}, tls={self._use_tls})"
@@ -366,7 +363,7 @@ class SmppSmsSender:
                 self._unbind(session)
                 if submit.command_status != ESME_ROK:
                     raise SmppError(f"SMSC refused submit_sm, status 0x{submit.command_status:08X}")
-                message_id, _ = read_c_octet(submit.body)
+                reference = self._message_reference(submit.body)
         except SmppError as exc:
             log.error("smpp send failed", extra={"error": str(exc), "smsc": self._host})
             raise
@@ -380,10 +377,37 @@ class SmppSmsSender:
 
         log.info(
             "smpp submit accepted",
-            extra={"message_id": message_id, "binary": request.requires_binary},
+            extra={"message_ref": reference, "binary": request.requires_binary},
         )
-        self._audit(request, message_id)
-        return SmsResult(self.name, message_id, request.requires_binary)
+        self._audit(request, reference)
+        return SmsResult(self.name, reference, request.requires_binary)
+
+    def _message_reference(self, submit_sm_resp_body: bytes) -> str:
+        """Return a log-safe reference for the SMSC's message_id.
+
+        The message_id is whatever the SMSC chose to send, so it is never logged
+        or stored: it could carry the MSISDN or the OTP. A keyed digest still lets
+        log lines and the audit record of one send be matched up. The key lives
+        only in this process, so the digest of a guessable value such as an MSISDN
+        cannot be reversed offline.
+
+        A malformed message_id does not fail the send. The SMSC answered ESME_ROK,
+        so the SMS is on its way; answering 503 would delete the challenge whose
+        code the user is about to receive.
+        """
+        end = submit_sm_resp_body.find(b"\x00")
+        raw = submit_sm_resp_body if end < 0 else submit_sm_resp_body[:end]
+        if end < 0 or end + 1 > _MAX_MESSAGE_ID:
+            log.warning(
+                "smpp message_id is malformed",
+                extra={
+                    "message_id_length": len(raw),
+                    "terminated": end >= 0,
+                    "smsc": self._host,
+                },
+            )
+        digest = hmac.new(self._reference_key, raw, hashlib.sha256).hexdigest()
+        return f"smpp-{digest[:16]}"
 
     def _connect(self) -> socket.socket:
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
@@ -404,14 +428,14 @@ class SmppSmsSender:
         except (SmppError, OSError):
             log.warning("smpp unbind did not complete", extra={"smsc": self._host})
 
-    def _audit(self, request: SmsRequest, message_id: str) -> None:
+    def _audit(self, request: SmsRequest, reference: str) -> None:
         if self._store is None:
             return
         # Audit the fact of the send, never the OTP body.
         self._store.record_sms(
             SmsMessage(
                 msisdn=request.msisdn,
-                body=f"<redacted:{message_id}>",
+                body=f"<redacted:{reference}>",
                 sms_port=request.sms_port,
                 provider=self.name,
                 binary=request.requires_binary,

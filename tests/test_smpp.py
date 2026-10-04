@@ -46,7 +46,6 @@ from acs.sms.smpp import (
     SmppError,
     SmppSmsSender,
     encode_short_message,
-    read_c_octet,
 )
 from acs.store.memory import MemoryStore
 
@@ -224,7 +223,7 @@ def test_port_addressed_submit_sm_carries_the_udh_with_udhi_and_8bit_coding(
         + user_data
     )
     assert smsc.raw[1] == struct.pack(">IIII", 16 + len(body), 0x00000004, 0, 2) + body
-    assert result.message_id == "msg-0001"
+    assert result.message_id.startswith("smpp-")
     assert result.binary is True
 
 
@@ -314,12 +313,6 @@ def test_invalid_bind_parameters_fail_at_construction(
         SmppSmsSender(**options)  # type: ignore[arg-type]
 
 
-def test_a_c_octet_string_without_a_terminator_is_a_protocol_error() -> None:
-    assert read_c_octet(b"abc\x00def\x00", 4) == ("def", 8)
-    with pytest.raises(SmppError, match="NUL-terminated"):
-        read_c_octet(b"abc")
-
-
 # ----------------------------------------------------------------- failures
 def test_a_refused_bind_is_a_delivery_failure_and_nothing_is_submitted(
     smsc: FakeSmsc,
@@ -349,7 +342,7 @@ def test_an_smsc_that_never_answers_times_out(smsc: FakeSmsc) -> None:
 
 def test_an_unanswered_unbind_does_not_fail_an_accepted_message(smsc: FakeSmsc) -> None:
     smsc.behaviours[UNBIND] = silent
-    assert sender_for(smsc, timeout=0.3).send(port_request()).message_id == "msg-0001"
+    assert sender_for(smsc, timeout=0.3).send(port_request()).message_id.startswith("smpp-")
 
 
 def test_a_generic_nack_is_a_delivery_failure(smsc: FakeSmsc) -> None:
@@ -429,7 +422,7 @@ def test_an_enquire_link_from_the_smsc_is_answered_while_waiting(smsc: FakeSmsc)
     smsc.behaviours[SUBMIT_SM] = smsc_request_first(
         Pdu(ENQUIRE_LINK, 0, 777), respond(body=b"msg-0001\x00")
     )
-    assert sender_for(smsc).send(port_request()).message_id == "msg-0001"
+    assert sender_for(smsc).send(port_request()).message_id.startswith("smpp-")
     assert Pdu(ENQUIRE_LINK_RESP, 0, 777) in smsc.received
 
 
@@ -488,11 +481,50 @@ def test_neither_the_password_nor_the_otp_nor_the_msisdn_is_logged(
 
 def test_the_audit_record_never_holds_the_otp(smsc: FakeSmsc) -> None:
     store = MemoryStore()
-    sender_for(smsc, store=store).send(port_request())
+    result = sender_for(smsc, store=store).send(port_request())
     record = store.list_sms(TEST_MSISDN)[0]
-    assert record.body == "<redacted:msg-0001>"
+    assert record.body == f"<redacted:{result.message_id}>"
     assert record.binary is True
     assert record.sms_port == 37273
+
+
+@pytest.mark.parametrize(
+    ("message_id", "malformed"),
+    [
+        (b"x" * 64 + b"\x00", False),
+        (b"x" * 65 + b"\x00", True),
+        (b"x" * 300, True),
+    ],
+    ids=["64-characters", "65-characters", "unterminated"],
+)
+def test_a_malformed_message_id_is_noted_without_failing_the_accepted_send(
+    smsc: FakeSmsc, smpp_log: io.StringIO, message_id: bytes, malformed: bool
+) -> None:
+    smsc.behaviours[SUBMIT_SM] = respond(body=message_id)
+    # Accepted by the SMSC, so the SMS is on its way: a 503 here would delete the
+    # challenge whose code the user is about to receive.
+    result = sender_for(smsc).send(port_request())
+    assert result.message_id.startswith("smpp-")
+    output = smpp_log.getvalue()
+    assert ("smpp message_id is malformed" in output) is malformed
+    if malformed:
+        length = len(message_id.rstrip(b"\x00"))
+        assert f'"message_id_length": {length}' in output
+    assert "x" * 20 not in output
+
+
+def test_an_smsc_message_id_carrying_subscriber_data_is_never_recorded(
+    smsc: FakeSmsc, smpp_log: io.StringIO
+) -> None:
+    hostile = f"{TEST_MSISDN}:{OTP}".encode()
+    smsc.behaviours[SUBMIT_SM] = respond(body=hostile + b"\x00")
+    store = MemoryStore()
+    result = sender_for(smsc, store=store).send(port_request())
+    recorded = smpp_log.getvalue() + result.message_id + store.list_sms(TEST_MSISDN)[0].body
+    for secret in (TEST_MSISDN, DEST.decode(), OTP):
+        assert secret not in recorded
+    # The same message_id maps to the same reference, so log lines still correlate.
+    assert result.message_id in smpp_log.getvalue()
 
 
 # ------------------------------------------------------------ configuration

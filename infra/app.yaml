@@ -469,17 +469,21 @@ Resources:
                 Resource:
                   - !GetAtt Table.Arn
                   - !Sub '${Table.Arn}/index/gsi1'
-        - PolicyName: acs-sms-send
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              # Sending an SMS to a phone number has no resource ARN to scope
-              # to, so the permission is narrowed to these two actions only.
-              - Effect: Allow
-                Action:
-                  - sms-voice:SendTextMessage
-                  - sns:Publish
-                Resource: '*'
+        # Sending an SMS to a phone number has no resource ARN to scope to, so
+        # the permission is narrowed to these two actions, and withheld entirely
+        # when the SMSC carries the OTP instead.
+        - !If
+          - UseSmpp
+          - !Ref AWS::NoValue
+          - PolicyName: acs-sms-send
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - sms-voice:SendTextMessage
+                    - sns:Publish
+                  Resource: '*'
 
   # ---------------------------------------------------------------- logging
   LogGroup:

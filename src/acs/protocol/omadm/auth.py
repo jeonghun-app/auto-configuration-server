@@ -85,7 +85,7 @@ def authenticate(
             return DmAuthResult(False, reason="malformed", challenge_nonce=nonce or make_nonce())
         username, password = decoded
         expected = lookup_password(username)  # type: ignore[operator]
-        if not expected or not hmac.compare_digest(str(expected), password):
+        if not expected or not hmac.compare_digest(str(expected).encode(), password.encode()):
             return DmAuthResult(
                 False, username=username, reason="invalid", challenge_nonce=nonce or make_nonce()
             )
@@ -121,7 +121,7 @@ def authenticate_md5(
             False, username=username, reason="invalid", challenge_nonce=nonce or make_nonce()
         )
     expected = md5_credential(username, expected_password, nonce)
-    if not hmac.compare_digest(expected, credentials.data.strip()):
+    if not hmac.compare_digest(expected.encode(), credentials.data.strip().encode()):
         return DmAuthResult(
             False, username=username, reason="invalid", challenge_nonce=make_nonce()
         )

@@ -30,7 +30,7 @@ from acs.domain.models import Device, DmSession
 from acs.observability import get_logger
 from acs.protocol.identity import derive_identity
 from acs.protocol.omadm import auth as dm_auth
-from acs.protocol.omadm import motree
+from acs.protocol.omadm import motree, wbxml
 from acs.protocol.omadm.syncml import (
     ALERT_CLIENT_INITIATED_MGMT,
     ALERT_END_OF_SESSION,
@@ -38,6 +38,7 @@ from acs.protocol.omadm.syncml import (
     ALERT_SESSION_ABORT,
     AUTH_BASIC,
     AUTH_MD5,
+    CONTENT_TYPE_WBXML,
     CONTENT_TYPE_XML,
     STATUS_ALREADY_EXISTS,
     STATUS_AUTH_ACCEPTED,
@@ -89,21 +90,27 @@ class DmService:
         if len(payload) > self._settings.dm_max_msg_size * 4:
             return DmResponse(status_code=413, metric="DmTooLarge", detail="payload_too_large")
 
-        if content_type and "wbxml" in content_type.lower():
-            # Refusing explicitly is better than replying with XML the client
-            # cannot decode.
+        media_type = content_type.partition(";")[0].strip().lower()
+        binary = media_type == CONTENT_TYPE_WBXML
+        if "wbxml" in media_type and not binary:
             return DmResponse(
                 status_code=415,
                 metric="DmUnsupportedEncoding",
-                detail="wbxml_not_supported",
+                detail="unsupported_content_type",
             )
 
         try:
-            message = parse_syncml(payload)
-        except SyncMlParseError as exc:
+            message = parse_syncml(wbxml.decode(payload) if binary else payload)
+            outcome = self._handle_message(message)
+            if binary and outcome.body:
+                outcome.body = wbxml.encode(outcome.body, version=payload[0])
+                outcome.content_type = CONTENT_TYPE_WBXML
+            return outcome
+        except (SyncMlParseError, wbxml.WbxmlError) as exc:
             log.warning("dm parse failure", extra={"error": str(exc)})
             return DmResponse(status_code=400, metric="DmProtocolError", detail=str(exc))
 
+    def _handle_message(self, message: SyncMlMessage) -> DmResponse:
         header = message.header
         if not header.session_id or not header.msg_id:
             return DmResponse(

@@ -726,16 +726,32 @@ requirements:
     title: Accept the WBXML SyncML encoding
     spec: OMA-TS-DM_RepPro, WBXML encoding
     level: mandatory
-    status: not-implemented
+    status: partial
     verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/wbxml.py::decode
+      - src/acs/protocol/omadm/wbxml.py::encode
+      - src/acs/protocol/omadm/session.py::DmService.handle
     tests:
-      - tests/test_dm_session.py::test_wbxml_is_refused_explicitly
+      - tests/test_dm_wbxml.py::test_a_fixed_wbxml_vector_decodes_to_the_expected_syncml_message
+      - tests/test_dm_wbxml.py::test_both_wbxml_versions_and_syncml_public_identifiers_round_trip
+      - tests/test_dm_wbxml.py::test_malformed_or_unsupported_wbxml_is_rejected
+      - tests/test_dm_wbxml_session.py::test_wbxml_requests_preserve_state_through_a_complete_dm_session
+      - tests/test_dm_wbxml_session.py::test_wbxml_md5_credentials_are_checked_against_the_stored_nonce
+      - tests/test_dm_wbxml_simulator.py::test_the_wbxml_cli_drives_an_authenticated_session
+    note: >
+      WBXML 1.2/1.3, numeric and string SyncML 1.1/1.2 public IDs, UTF-8,
+      SyncML and MetInf code pages, STR_I, STR_T and text-valued OPAQUE are
+      implemented. Responses preserve the request encoding and WBXML version.
+      XML and WBXML share authentication and persisted session state.
     gap: >
-      Only the XML encoding is implemented. A WBXML request is refused with HTTP
-      415 rather than answered with XML the client cannot decode.
+      This is the text-valued SyncML / MetInf subset, not general WBXML.
+      Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY,
+      processing instructions and other code pages are refused with HTTP 400.
     impact: >
-      A WBXML-only DM client cannot be managed at all. This is the largest
-      remaining interoperability gap on the DM plane.
+      WBXML clients using this subset can complete DM sessions. Clients needing
+      arbitrary binary management objects or the unsupported WBXML constructs
+      cannot use those features. No real-handset interoperability is claimed.
 
   - id: OMADM-SEC-XXE
     title: Parse device-supplied SyncML without resolving external entities
@@ -756,9 +772,14 @@ requirements:
     verification: behaviour-tested
     implemented_by:
       - src/acs/protocol/omadm/session.py::DmService.handle
+      - src/acs/api/dm.py::dm_session
+      - src/acs/protocol/omadm/wbxml.py::decode
     tests:
       - tests/test_dm_session.py::test_oversized_payload_is_refused
       - tests/test_dm_session.py::test_dm_endpoint_refuses_a_huge_body
+      - tests/test_dm_wbxml.py::test_repeated_string_table_references_cannot_exhaust_memory
+      - tests/test_dm_wbxml.py::test_wbxml_nesting_is_bounded_in_both_directions
+      - tests/test_dm_wbxml_session.py::test_the_dm_route_stops_reading_as_soon_as_the_body_limit_is_exceeded
 
   - id: OMADM-SEC-SESSION-STORE
     title: Keep session state where every server task can see it

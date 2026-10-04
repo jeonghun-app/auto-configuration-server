@@ -20,6 +20,7 @@ import uvicorn
 from tests.conftest import clear_otp
 from tools.dm_client_sim import Checker as DmChecker
 from tools.dm_client_sim import DmClientSimulator, run_session
+from tools.dm_client_sim import main as dm_main
 from tools.rcs_client_sim import Checker, RcsClientSimulator, scenario_disabled, scenario_full
 
 from acs.app import create_app
@@ -156,8 +157,10 @@ def test_not_entitled_subscriber_is_refused(server: LiveServer) -> None:
     assert checker.failures == []
 
 
+@pytest.mark.spec
+@pytest.mark.parametrize("wbxml", [False, True], ids=["xml", "wbxml"])
 def test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp(
-    server: LiveServer, live_store: MemoryStore
+    server: LiveServer, live_store: MemoryStore, wbxml: bool
 ) -> None:
     # 1. RCS provisioning, which emits the w7 DM account.
     clear_otp(live_store, TEST_MSISDN)
@@ -186,6 +189,7 @@ def test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp(
         imei=TEST_IMEI,
         password=dm_password,
         auth="basic",
+        wbxml=wbxml,
     )
     dm_checker = DmChecker()
     try:
@@ -194,6 +198,39 @@ def test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp(
         dm_sim.close()
     assert dm_checker.failures == []
     assert "./3GPP_IMS/1/Voice_Domain_Preference_E_UTRAN" in dm_sim.received
+
+
+@pytest.mark.spec
+def test_the_wbxml_cli_completes_a_live_dm_session(
+    server: LiveServer, live_store: MemoryStore
+) -> None:
+    subscriber = live_store.get_subscriber(TEST_IMSI)
+    assert subscriber is not None
+    previous_password = subscriber.dm_password
+    subscriber.dm_password = "wbxml-cli-test"
+    live_store.put_subscriber(subscriber)
+    try:
+        assert (
+            dm_main(
+                [
+                    "--base-url",
+                    server.base_url,
+                    "--imsi",
+                    TEST_IMSI,
+                    "--imei",
+                    TEST_IMEI,
+                    "--password",
+                    subscriber.dm_password,
+                    "--auth",
+                    "md5",
+                    "--wbxml",
+                ]
+            )
+            == 0
+        )
+    finally:
+        subscriber.dm_password = previous_password
+        live_store.put_subscriber(subscriber)
 
 
 def test_dm_session_with_a_wrong_password_never_reaches_configuration(

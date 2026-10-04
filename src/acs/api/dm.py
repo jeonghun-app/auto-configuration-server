@@ -22,11 +22,13 @@ MAX_BODY_BYTES = 512 * 1024
 @router.post("/dm", summary="OMA-DM SyncML session")
 async def dm_session(request: Request) -> Response:
     app_state: AppState = request.app.state.acs
-    payload = await request.body()
-    if len(payload) > MAX_BODY_BYTES:
-        return Response(status_code=413)
+    payload = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > MAX_BODY_BYTES - len(payload):
+            return Response(status_code=413)
+        payload.extend(chunk)
 
-    outcome = app_state.dm.handle(payload, request.headers.get("content-type", ""))
+    outcome = app_state.dm.handle(bytes(payload), request.headers.get("content-type", ""))
     app_state.metrics.emit(
         outcome.metric or "DmRequest",
         1,

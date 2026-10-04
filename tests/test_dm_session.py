@@ -98,11 +98,10 @@ def test_disabled_dm_returns_404(dm_store: MemoryStore) -> None:
     assert DmService(off, dm_store).handle(package(1, PACKAGE_1_BODY)).status_code == 404
 
 
-def test_wbxml_is_refused_explicitly(dm: DmService) -> None:
-    # Answering with XML a client cannot decode is worse than a clear refusal.
+def test_xml_mislabeled_as_wbxml_is_rejected(dm: DmService) -> None:
     outcome = dm.handle(package(1, PACKAGE_1_BODY), "application/vnd.syncml.dm+wbxml")
-    assert outcome.status_code == 415
-    assert outcome.detail == "wbxml_not_supported"
+    assert outcome.status_code == 400
+    assert outcome.detail == "unsupported WBXML version"
 
 
 def test_malformed_payload_returns_400(dm: DmService) -> None:

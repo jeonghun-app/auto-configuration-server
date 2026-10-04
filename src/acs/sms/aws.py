@@ -14,14 +14,24 @@ from __future__ import annotations
 
 import boto3
 from botocore.config import Config as BotoConfig
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from acs.domain.models import SmsMessage
 from acs.observability import get_logger
-from acs.sms.base import SmsRequest, SmsResult, UnsupportedDelivery
+from acs.sms.base import SmsDeliveryFailed, SmsRequest, SmsResult, UnsupportedDelivery
 from acs.store.base import Store
 
 log = get_logger(__name__)
+
+
+def _describe(exc: ClientError | BotoCoreError) -> tuple[str, str | None]:
+    """The error code and AWS request id: enough to diagnose, never the message."""
+    if isinstance(exc, ClientError):
+        error = str(exc.response.get("Error", {}).get("Code", exc.__class__.__name__))
+        request_id = exc.response.get("ResponseMetadata", {}).get("RequestId")
+        return error, str(request_id) if request_id else None
+    return exc.__class__.__name__, None
+
 
 _BOTO = BotoConfig(retries={"max_attempts": 3, "mode": "standard"}, connect_timeout=2)
 
@@ -59,9 +69,14 @@ class EndUserMessagingSender:
             params["OriginationIdentity"] = self._origination_identity
         try:
             response = self._client.send_text_message(**params)
-        except ClientError as exc:
-            log.error("end user messaging send failed", extra={"error": str(exc)})
-            raise
+        except (ClientError, BotoCoreError) as exc:
+            # AWS messages can echo the destination or OTP, even in a chained traceback.
+            error, request_id = _describe(exc)
+            log.error(
+                "end user messaging send failed",
+                extra={"error": error, "aws_request_id": request_id},
+            )
+            raise SmsDeliveryFailed(error) from None
         message_id = str(response.get("MessageId", ""))
         self._audit(request, message_id)
         return SmsResult(self.name, message_id)
@@ -107,9 +122,11 @@ class SnsSmsSender:
                 Message=request.body,
                 MessageAttributes=attributes,
             )
-        except ClientError as exc:
-            log.error("sns sms send failed", extra={"error": str(exc)})
-            raise
+        except (ClientError, BotoCoreError) as exc:
+            # AWS messages can echo the destination or OTP, even in a chained traceback.
+            error, request_id = _describe(exc)
+            log.error("sns sms send failed", extra={"error": error, "aws_request_id": request_id})
+            raise SmsDeliveryFailed(error) from None
         message_id = str(response.get("MessageId", ""))
         if self._store is not None:
             self._store.record_sms(

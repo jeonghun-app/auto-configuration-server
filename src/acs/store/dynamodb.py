@@ -6,7 +6,7 @@ Table design (partition key ``pk``, sort key ``sk``)::
     MSISDN#<msisdn>  SUB           reverse index -> imsi
     OTP#<msisdn>     CHAL          pending OTP challenge          (TTL)
     OTPQUOTA#<msisdn> SENDS        send times for the daily cap   (TTL)
-    OTPSEND#<msisdn> <epoch>       legacy send rows, read once to seed OTPQUOTA#
+    OTPSEND#<msisdn> <epoch>       legacy send rows: seed OTPQUOTA#, dual-written for 1.3
     TOKEN#<sha256>   META          provisioning token            (TTL)
     DEV#<device_id>  META          managed device
     DMSESS#<sid>     META          OMA-DM session state           (TTL)
@@ -236,9 +236,23 @@ class DynamoDbStore:
             else:
                 challenge_put["ConditionExpression"] = _SAME_CHALLENGE
                 challenge_put["ExpressionAttributeValues"] = _same_challenge_values(existing)
+            # Mixed-version compatibility, to be removed by #28 ("Stop dual-writing
+            # legacy OTPSEND rows") once no 1.3 task can be running: 1.3 counts
+            # the daily cap by querying these rows, so during a rolling deployment
+            # it must see the sends made here. Same key, attributes and TTL as
+            # 1.3's record_otp_send. Unconditional, as 1.3 wrote it.
+            legacy_put: dict[str, Any] = {
+                "TableName": self._table_name,
+                "Item": {
+                    "pk": f"OTPSEND#{msisdn}",
+                    "sk": str(now).zfill(12),
+                    "entity": "otp_send",
+                    "expires_at": now + 86400,
+                },
+            }
             try:
                 client.transact_write_items(
-                    TransactItems=[{"Put": quota_put}, {"Put": challenge_put}]
+                    TransactItems=[{"Put": quota_put}, {"Put": challenge_put}, {"Put": legacy_put}]
                 )
             except ClientError as exc:
                 if not _lost_a_condition(exc):

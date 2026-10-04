@@ -27,7 +27,7 @@ development and unit tests, and is refused in staging and production at startup.
 SUB#<imsi>       META      subscriber record          gsi1pk=ENTITY#subscriber
 MSISDN#<msisdn>  SUB       reverse index -> imsi
 OTP#<msisdn>     CHAL      pending challenge          TTL
-OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (superseded, read once to seed OTPQUOTA#)
+OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (superseded; seeds OTPQUOTA#, dual-written until #28)
 TOKEN#<sha256>   META      token                      gsi1pk=TOKENIMSI#<imsi>, TTL
 DEV#<device_id>  META      managed device             gsi1pk=ENTITY#device
 DMSESS#<sid>     META      DM session state           TTL
@@ -136,6 +136,13 @@ verification that loses five rounds is not verified.
   are never written again and expire by TTL within a day, after which the seed
   finds nothing. The resend cooldown is unaffected because it is read from the
   challenge.
+- **Mixed versions.** The atomic limit holds once every task runs 1.4.0; during a
+  rolling deployment the 1.3 tasks' non-atomic check still applies, and
+  dual-writing lets them see the new tasks' sends. While 1.4.x is current,
+  `issue_otp` also writes the legacy `OTPSEND#<msisdn>` row (1.3's key,
+  attributes and TTL) as a third `Put` in the same transaction, so 1.3's `Query`
+  counts sends made by 1.4 tasks. No new IAM action is needed. Removing the dual
+  write once no 1.3 task can run is tracked in #28.
 - The quota item keeps a list of send times, not a counter, so the 24-hour window
   stays rolling. The list is bounded by the cap.
 - moto applies requests without locking, so the concurrency tests serialise

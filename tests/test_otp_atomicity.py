@@ -10,6 +10,7 @@ same contract is asserted on the in-memory store and on DynamoDB (moto).
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
 
@@ -470,3 +471,27 @@ def test_contention_answers_503_without_a_pending_signal(
     assert outcome.headers["Retry-After"] == "5"
     assert (outcome.metric, outcome.detail) == ("OtpStoreContention", "otp_store_contention")
     assert store.list_sms(TEST_MSISDN) == []
+
+
+@pytest.mark.aws
+def test_a_send_by_this_version_is_counted_by_the_legacy_query(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    """During a rolling deployment 1.3 tasks count the cap from OTPSEND# rows."""
+    from boto3.dynamodb.conditions import Key
+
+    now = int(time.time())
+    assert dynamo_store.issue_otp(challenge(now), 0, 5, now) is None
+    # 1.3's count_otp_sends_today, verbatim in effect.
+    cutoff = int(time.time()) - 86400
+    response = dynamo_store._table.query(
+        KeyConditionExpression=Key("pk").eq(f"OTPSEND#{TEST_MSISDN}")
+        & Key("sk").gte(str(cutoff).zfill(12)),
+        Select="COUNT",
+    )
+    assert response["Count"] == 1
+    row = dynamo_store._table.get_item(
+        Key={"pk": f"OTPSEND#{TEST_MSISDN}", "sk": str(now).zfill(12)}
+    )["Item"]
+    assert row["entity"] == "otp_send"
+    assert int(row["expires_at"]) == now + 86400

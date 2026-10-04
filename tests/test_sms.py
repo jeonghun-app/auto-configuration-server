@@ -251,3 +251,22 @@ def test_port_addressing_udh_is_built_correctly() -> None:
 def test_udh_rejects_out_of_range_ports() -> None:
     with pytest.raises(ValueError, match="16 bits"):
         SmppSmsSender.build_udh(70000)
+
+
+@pytest.mark.aws
+def test_an_aws_failure_logs_the_request_id_for_support(
+    aws_sender: SnsSmsSender | EndUserMessagingSender, aws_log: io.StringIO
+) -> None:
+    method = "publish" if aws_sender.name == "sns" else "send_text_message"
+    with Stubber(aws_sender._client) as stubber:
+        stubber.add_client_error(
+            method,
+            service_error_code="ThrottlingException",
+            service_message=AWS_ERROR_MESSAGE,
+            response_meta={"RequestId": "req-0123456789abcdef"},
+        )
+        with pytest.raises(SmsDeliveryFailed):
+            aws_sender.send(SmsRequest(msisdn=MSISDN, body=BODY))
+    output = aws_log.getvalue()
+    assert '"aws_request_id": "req-0123456789abcdef"' in output
+    assert_aws_failure_is_private(output, "ThrottlingException")

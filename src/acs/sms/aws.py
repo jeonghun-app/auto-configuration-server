@@ -23,6 +23,16 @@ from acs.store.base import Store
 
 log = get_logger(__name__)
 
+
+def _describe(exc: ClientError | BotoCoreError) -> tuple[str, str | None]:
+    """The error code and AWS request id: enough to diagnose, never the message."""
+    if isinstance(exc, ClientError):
+        error = str(exc.response.get("Error", {}).get("Code", exc.__class__.__name__))
+        request_id = exc.response.get("ResponseMetadata", {}).get("RequestId")
+        return error, str(request_id) if request_id else None
+    return exc.__class__.__name__, None
+
+
 _BOTO = BotoConfig(retries={"max_attempts": 3, "mode": "standard"}, connect_timeout=2)
 
 _BINARY_UNSUPPORTED = (
@@ -61,10 +71,11 @@ class EndUserMessagingSender:
             response = self._client.send_text_message(**params)
         except (ClientError, BotoCoreError) as exc:
             # AWS messages can echo the destination or OTP, even in a chained traceback.
-            error = exc.__class__.__name__
-            if isinstance(exc, ClientError):
-                error = str(exc.response.get("Error", {}).get("Code", error))
-            log.error("end user messaging send failed", extra={"error": error})
+            error, request_id = _describe(exc)
+            log.error(
+                "end user messaging send failed",
+                extra={"error": error, "aws_request_id": request_id},
+            )
             raise SmsDeliveryFailed(error) from None
         message_id = str(response.get("MessageId", ""))
         self._audit(request, message_id)
@@ -113,10 +124,8 @@ class SnsSmsSender:
             )
         except (ClientError, BotoCoreError) as exc:
             # AWS messages can echo the destination or OTP, even in a chained traceback.
-            error = exc.__class__.__name__
-            if isinstance(exc, ClientError):
-                error = str(exc.response.get("Error", {}).get("Code", error))
-            log.error("sns sms send failed", extra={"error": error})
+            error, request_id = _describe(exc)
+            log.error("sns sms send failed", extra={"error": error, "aws_request_id": request_id})
             raise SmsDeliveryFailed(error) from None
         message_id = str(response.get("MessageId", ""))
         if self._store is not None:

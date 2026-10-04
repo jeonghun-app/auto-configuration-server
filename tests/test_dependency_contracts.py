@@ -18,6 +18,7 @@ from collections.abc import Iterator
 from http.cookies import SimpleCookie
 from typing import Any
 
+import boto3
 import pytest
 from botocore.awsrequest import AWSResponse
 from fastapi.testclient import TestClient
@@ -193,6 +194,12 @@ class _Body:
 
 
 def _isolate_aws_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    # boto3.resource() goes through boto3's process-wide default session, which
+    # caches the credentials it first resolves. If an earlier test resolved them
+    # without AWS_ACCOUNT_ID, the account-ID endpoint below is never chosen, and
+    # the test failed only after such a test ran. A fresh session per test, put
+    # back by monkeypatch afterwards, takes its credentials from this environment.
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
     for name in ("AWS_PROFILE", "AWS_ACCOUNT_ID_ENDPOINT_MODE", "AWS_SESSION_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
@@ -248,6 +255,26 @@ def test_without_a_configured_endpoint_dynamodb_is_reached_on_its_aws_endpoint(
     monkeypatch.setenv("AWS_ACCOUNT_ID_ENDPOINT_MODE", "disabled")
     url = _first_request_url(DynamoDbStore("rcs-acs", "ap-northeast-2"))
     assert url == "https://dynamodb.ap-northeast-2.amazonaws.com/"
+
+
+@pytest.mark.aws
+def test_credentials_cached_by_an_earlier_test_do_not_hide_the_account_id_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    # What used to happen when another test ran first: the process-wide default
+    # session resolved credentials without an account ID, and kept them.
+    monkeypatch.setattr(boto3, "DEFAULT_SESSION", None)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "earlier")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "earlier")
+    monkeypatch.delenv("AWS_ACCOUNT_ID", raising=False)
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    boto3.resource("dynamodb", region_name="ap-northeast-2")
+    assert boto3.DEFAULT_SESSION is not None
+    _isolate_aws_environment(monkeypatch, tmp_path)
+    for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_DYNAMODB", "ACS_DYNAMODB_ENDPOINT_URL"):
+        monkeypatch.delenv(name, raising=False)
+    url = _first_request_url(DynamoDbStore("rcs-acs", "ap-northeast-2"))
+    assert url == "https://111122223333.ddb.ap-northeast-2.amazonaws.com/"
 
 
 # ----------------------------------------------------------- cookies, headers

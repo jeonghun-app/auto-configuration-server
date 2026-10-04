@@ -90,7 +90,7 @@ def test_invalid_lengths_are_rejected_without_waiting_for_a_body(
             struct.pack(">IIII", length, BIND_TRANSCEIVER_RESP, 0, request.sequence_number)
         )
         answer, _ = read_pdu(conn)
-        smsc.received.append(answer)
+        smsc.record(answer)
         return False
 
     peer.behaviours[BIND_TRANSCEIVER] = corrupt
@@ -98,8 +98,7 @@ def test_invalid_lengths_are_rejected_without_waiting_for_a_body(
     with pytest.raises(SmppError, match="invalid command_length"):
         sender_for(peer, timeout=0.3).send(port_request())
     assert time.monotonic() - started < 1
-    peer._thread.join(timeout=1)
-    assert peer.received[-1].command_id == GENERIC_NACK
+    assert peer.wait_for_received(2)[-1].command_id == GENERIC_NACK
     assert SUBMIT_SM not in peer.ids()
 
 

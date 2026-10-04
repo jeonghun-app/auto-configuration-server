@@ -33,16 +33,20 @@ TEST_MSISDN = "+821012345678"
 TEST_IMEI = "356938035643809"
 
 
-def free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return int(probe.getsockname()[1])
-
-
 class LiveServer:
+    """uvicorn in a thread, on a socket bound before the app is built.
+
+    The port used to be probed, released and re-bound by uvicorn. Anything else on
+    the host could take it in between - another test run, say - and then every
+    test here errored with "server did not become healthy". Binding once to port
+    0 and handing uvicorn the socket leaves no window.
+    """
+
     def __init__(self, store: MemoryStore) -> None:
         self.store = store
-        self.port = free_port()
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._socket.bind(("127.0.0.1", 0))
+        self.port = int(self._socket.getsockname()[1])
         settings = Settings(
             env="dev",
             store_backend="memory",
@@ -55,32 +59,45 @@ class LiveServer:
         )
         config = uvicorn.Config(
             create_app(settings, store),
-            host="127.0.0.1",
-            port=self.port,
             log_level="warning",
             access_log=False,
         )
         self._server = uvicorn.Server(config)
-        self._thread = threading.Thread(target=self._server.run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._server.run, kwargs={"sockets": [self._socket]}, daemon=True
+        )
 
     @property
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
     def start(self) -> None:
+        try:
+            self._wait_until_serving()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _wait_until_serving(self) -> None:
         self._thread.start()
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            try:
-                if httpx.get(f"{self.base_url}/healthz", timeout=1).status_code == 200:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if not self._thread.is_alive():
+                raise RuntimeError("server thread exited during startup")
+            # uvicorn sets started once the lifespan has run and it is serving.
+            if self._server.started:
+                response = httpx.get(f"{self.base_url}/healthz", timeout=2)
+                if response.status_code == 200:
                     return
-            except httpx.HTTPError:
-                time.sleep(0.1)
-        raise RuntimeError("server did not become healthy")
+                raise RuntimeError(f"server started but /healthz answered {response.status_code}")
+            time.sleep(0.05)
+        raise RuntimeError("server did not start within 20s")
 
     def stop(self) -> None:
         self._server.should_exit = True
-        self._thread.join(timeout=10)
+        if self._thread.is_alive():
+            self._thread.join(timeout=10)
+        self._socket.close()
 
 
 @pytest.fixture(scope="module")

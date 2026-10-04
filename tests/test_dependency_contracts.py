@@ -2,9 +2,10 @@
 
 Each test here pins something the application relies on but does not implement
 itself: form parsing (python-multipart, Starlette), cookie and header emission
-(Starlette), the XML parser's refusal of hostile documents (lxml/libxml2) and the
-string form of the protocol enums. A future bump that changes any of these fails
-here rather than in production.
+(Starlette), the XML parser's refusal of hostile documents (lxml/libxml2),
+uvicorn's proxy-header rewrite of the client address and the string form of the
+protocol enums. A future bump that changes any of these fails here rather than in
+production.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from lxml import etree
 from tests.conftest import ADMIN_TOKEN, TEST_IMSI, TEST_MSISDN, base_query
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from acs.api.console import CSRF_COOKIE as CONSOLE_CSRF_COOKIE
 from acs.api.console import SESSION_COOKIE
@@ -92,6 +94,53 @@ def test_a_parameter_repeated_across_query_and_body_is_refused(client: TestClien
     form = {str(k): str(v) for k, v in base_query().items()}
     response = client.post("/config", params={"IMSI": TEST_IMSI}, data=form)
     assert response.status_code == 400
+
+
+# --------------------------------------------- uvicorn proxy headers (Dockerfile)
+def _behind_uvicorn_proxy_headers(settings: Settings, store: MemoryStore) -> TestClient:
+    # The image runs uvicorn with --proxy-headers --forwarded-allow-ips "*", so
+    # request.client is rewritten from X-Forwarded-For before the app sees it.
+    # With every hop trusted, uvicorn picks the *left-most* entry, which the caller
+    # controls. Header enrichment must keep deciding trust on the right-most entry.
+    enriching = settings.model_copy(update={"trusted_proxy_cidrs": "10.0.0.0/8"})
+    # Starlette and uvicorn type the ASGI callable differently; both are ASGI 3.
+    inner = create_app(enriching, store)
+    app = ProxyHeadersMiddleware(inner, trusted_hosts="*")  # type: ignore[arg-type]
+    return TestClient(app)  # type: ignore[arg-type]
+
+
+def test_enrichment_trusts_the_right_most_forwarded_entry_behind_uvicorn(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    query = {k: v for k, v in base_query().items() if k != "IMSI"}
+    with _behind_uvicorn_proxy_headers(settings, seeded_store) as client:
+        response = client.get(
+            "/config",
+            params=query,
+            headers={
+                "X-3GPP-Intended-Identity": TEST_MSISDN,
+                "X-Forwarded-For": "203.0.113.9, 10.0.0.7",
+            },
+        )
+    assert response.status_code == 200
+    assert b"wap-provisioningdoc" in response.content
+
+
+def test_a_forged_left_most_forwarded_entry_does_not_enrich_behind_uvicorn(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    query = {k: v for k, v in base_query().items() if k != "IMSI"}
+    with _behind_uvicorn_proxy_headers(settings, seeded_store) as client:
+        response = client.get(
+            "/config",
+            params=query,
+            headers={
+                "X-3GPP-Intended-Identity": TEST_MSISDN,
+                "X-Forwarded-For": "10.0.0.7, 203.0.113.9",
+            },
+        )
+    assert b"wap-provisioningdoc" not in response.content
+    assert response.status_code == 511
 
 
 # ----------------------------------------------------------- cookies, headers

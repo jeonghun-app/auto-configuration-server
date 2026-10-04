@@ -1,0 +1,236 @@
+name: Release
+
+# A release is a tag. Pushing vX.Y.Z runs the full check, refuses a tag that does
+# not match the declared version or has no CHANGELOG section, publishes a
+# multi-arch image to GHCR, and creates the GitHub Release from that section.
+# The procedure and the rollback are in docs/releasing.md.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+# One release at a time, across all tags. Whether a release moves "latest" and
+# "X.Y" is decided while it holds this lock, from the tags that exist then, so a
+# release delayed behind a newer one cannot move either backwards. A release
+# half-way through publishing is never cancelled. GitHub keeps only one pending
+# run per group: if a third tag is pushed while one runs and one waits, the
+# waiting run is cancelled and must be re-run (docs/releasing.md).
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  IMAGE: ghcr.io/jeonghun-app/auto-configuration-server
+
+jobs:
+  verify:
+    name: Verify the tag and run the full check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      # Actions are pinned to a commit SHA rather than a tag: a tag can be moved.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: needed to confirm the tag is on main.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Tag matches pyproject.toml, the package and CHANGELOG.md
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py verify "$TAG"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main; release only merged commits"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          make install
+
+      - name: make check
+        run: make check
+
+  image:
+    name: Build and push the image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Decided here, not in verify: a re-run of this job, or a run that waited
+      # behind a newer release, must see the tags as they are now.
+      - name: Decide whether latest and X.Y move
+        id: channels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref' > tags.txt
+          python scripts/release_notes.py channels "$TAG" < tags.txt | tee -a "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # X.Y.Z is immutable: a deployment may already pin it. If it exists, this
+      # run publishes nothing and only the Release notes are (re)written. The
+      # lookup runs after the login above, so a denial is a real denial and not
+      # "absent" (see image_state in scripts/release_notes.py).
+      - name: Refuse to overwrite an existing X.Y.Z
+        id: existing
+        env:
+          REF: ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}
+          FIRST_PUBLISH: ${{ vars.GHCR_FIRST_PUBLISH }}
+        run: |
+          set -euo pipefail
+          rc=0
+          out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)" || rc=$?
+          state="$(python scripts/release_notes.py image-state --exit-code "$rc" \
+            --first-publish "$FIRST_PUBLISH" <<<"$out" | sed -n 's/^state=//p')"
+          case "$state" in
+            exists)
+              digest="$(jq -r .digest <<<"$out")"
+              echo "::warning::$REF already exists ($digest); not rebuilding or pushing"
+              echo "digest=$digest" >> "$GITHUB_OUTPUT"
+              ;;
+            absent)
+              echo "$REF does not exist yet: $out"
+              ;;
+            absent-first-publish)
+              echo "::warning::lookup of $REF was denied and GHCR_FIRST_PUBLISH is true;" \
+                "treating it as the package's first publish. Delete the variable after this release."
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+      - id: meta
+        if: steps.existing.outputs.digest == ''
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # Put the annotations on the multi-arch index too, which is what GHCR
+          # displays for a package.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.channels.outputs.minor == 'true' }}
+            type=raw,value=latest,enable=${{ steps.channels.outputs.latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=GSMA RCS Auto Configuration Server
+            org.opencontainers.image.description=RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+          annotations: |
+            org.opencontainers.image.description=RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+
+      - id: build
+        if: steps.existing.outputs.digest == ''
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+
+  release:
+    name: Create the GitHub Release
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py notes "$VERSION" \
+            --image "$IMAGE" --digest "$DIGEST" --repo-url "$REPO_URL" > notes.md
+          cat notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Re-decided here too: re-running only this job reuses the image job's
+          # old outputs, which may predate a newer release.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref' > tags.txt
+          LATEST="$(python scripts/release_notes.py channels "$TAG" < tags.txt \
+            | sed -n 's/^latest=//p')"
+          echo "latest=$LATEST"
+          # Re-running the workflow for the same tag updates the notes rather
+          # than failing on an existing release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file notes.md --latest="$LATEST"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes-file notes.md --latest="$LATEST"
+          fi

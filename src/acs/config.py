@@ -10,12 +10,12 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "staging", "prod"]
 StoreBackend = Literal["memory", "dynamodb"]
-SmsProvider = Literal["mock", "sns", "eum"]
+SmsProvider = Literal["mock", "sns", "eum", "smpp"]
 PiiLogMode = Literal["mask", "hash", "none"]
 
 
@@ -110,6 +110,28 @@ class Settings(BaseSettings):
     sms_sender_id: str = "RCS"
     sms_otp_template: str = "RCS activation code: {otp}"
 
+    smpp_host: str = ""
+    """Operator SMSC for sms_provider=smpp, the only provider that can send a
+    port-addressed (silent) OTP."""
+    smpp_port: int = 2775
+    smpp_system_id: str = ""
+    smpp_password: SecretStr = SecretStr("")
+    smpp_system_type: str = ""
+    smpp_source_addr: str = ""
+    """Empty uses sms_sender_id. The TON/NPI below must describe whichever is used."""
+    smpp_source_addr_ton: int = 5
+    """5 = alphanumeric, matching the default sender id "RCS"."""
+    smpp_source_addr_npi: int = 0
+    smpp_dest_addr_ton: int = 1
+    """1 = international: the destination is the E.164 MSISDN without "+"."""
+    smpp_dest_addr_npi: int = 1
+    """1 = ISDN (E.164)."""
+    smpp_tls: bool = True
+    """SMPP sends the password in clear. Turn off only on a private link to the SMSC."""
+    smpp_tls_ca_file: str = ""
+    """CA bundle for an SMSC certificate from an operator private CA."""
+    smpp_timeout_seconds: float = 10.0
+
     # ---- Operational ------------------------------------------------------
     admin_token: str = ""
     """Empty (default) makes the admin API answer 503 — never a default token."""
@@ -149,6 +171,20 @@ class Settings(BaseSettings):
                 problems.append("dev_endpoints_enabled must be false in staging/prod.")
             if self.sms_provider == "mock":
                 problems.append("sms_provider=mock cannot be used in staging/prod.")
+            if self.sms_provider == "smpp":
+                missing = [
+                    name
+                    for name, value in (
+                        ("smpp_host", self.smpp_host),
+                        ("smpp_system_id", self.smpp_system_id),
+                        ("smpp_password", self.smpp_password.get_secret_value()),
+                    )
+                    if not value
+                ]
+                if missing:
+                    problems.append(
+                        "sms_provider=smpp requires " + ", ".join(missing) + " in staging/prod."
+                    )
             if self.pii_log_mode == "none":
                 problems.append("pii_log_mode=none is not permitted in staging/prod.")
             if self.pii_log_mode == "hash" and not self.pii_hash_secret:

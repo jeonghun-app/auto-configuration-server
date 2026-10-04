@@ -49,8 +49,8 @@ It is generated and gated, not written:
 | Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
 | --- | --- | --- | --- | --- | --- |
 | OMA Device Management 1.2 (server role) | 58 | 37 | 5 | 16 | 10 |
-| GSMA RCC.14 Service Provider Device Configuration (ACS role) | 55 | 43 | 9 | 3 | 7 |
-| **Total** | **113** | **80** | **14** | **19** | **17** |
+| GSMA RCC.14 Service Provider Device Configuration (ACS role) | 55 | 43 | 10 | 2 | 7 |
+| **Total** | **113** | **80** | **15** | **18** | **17** |
 
 **Overall: not fully conformant.** 17 requirements this project classifies as mandatory are not fully implemented, and 3 further specification families could not be assessed at all because the documents are not held. Both are listed below, and `scripts/gen_conformance.py --strict` exits non-zero for each reason separately.
 
@@ -339,7 +339,7 @@ These were asked for and **cannot be assessed here, because the document is not 
 | `RCC14-VERS-VALIDITY` | Emit a validity lifetime alongside the version | mandatory | yes | behaviour-tested | `test_document_starts_with_vers` | — |
 | `RCC14-AUTH-OTP` | Authenticate a subscriber with a single-use SMS OTP | mandatory | yes | behaviour-tested | `test_valid_otp_verifies_once`<br>`test_otp_verification_consumes_the_challenge` | — |
 | `RCC14-AUTH-OTP-ABUSE` | Bound OTP sends and verification attempts | mandatory | yes | behaviour-tested | `test_daily_quota_stops_sms_pumping`<br>`test_attempts_are_bounded`<br>`test_resend_within_the_cooldown_is_blocked` | An unbounded OTP endpoint is a direct financial attack on the operator. |
-| `RCC14-AUTH-OTP-PORT` | Deliver the OTP as a port-addressed binary SMS when SMS_port is given | conditional | no | behaviour-tested | `test_smpp_sender_is_explicitly_unimplemented`<br>`test_port_addressing_udh_is_built_correctly`<br>`test_port_addressed_otp_is_refused_rather_than_downgraded` | No AWS SMS service can set a User Data Header. SMS_port is carried end to end, the UDH builder is implemented and tested, and the AWS providers raise rather than send a text message the client will never read. |
+| `RCC14-AUTH-OTP-PORT` | Deliver the OTP as a port-addressed binary SMS when SMS_port is given | conditional | partial | behaviour-tested | `test_port_addressed_submit_sm_carries_the_udh_with_udhi_and_8bit_coding`<br>`test_bind_transceiver_pdu_is_encoded_octet_for_octet`<br>`test_a_port_addressed_otp_reaches_the_smsc_through_the_service`<br>`test_an_smsc_failure_answers_503_and_deletes_the_challenge`<br>`test_port_addressing_udh_is_built_correctly`<br>`test_port_addressed_otp_is_refused_rather_than_downgraded` | With sms_provider=smpp the OTP is sent through an operator SMSC over SMPP 3.4 as 8-bit data with UDHI set and the 16-bit application port UDH. This has been exercised only against the in-process fake SMSC in the test suite, never against an operator SMSC or a handset. The user data after the UDH is the configured OTP template; the content an RCS client expects there is not taken from a pinned RCC.14 edition. Messages longer than one SMS are refused, not concatenated. The AWS providers still refuse SMS_port. |
 | `RCC14-AUTH-TOKEN` | Let a token replace the OTP challenge on later requests | mandatory | yes | behaviour-tested | `test_token_skips_the_otp_challenge`<br>`test_valid_token_resolves` | — |
 | `RCC14-AUTH-TOKEN-BINDING` | Bind a token to the subscriber and the handset, and allow revocation | mandatory | yes | behaviour-tested | `test_token_bound_to_another_imei_is_rejected`<br>`test_only_the_digest_is_persisted`<br>`test_revoked_token_forces_rebootstrap` | — |
 | `RCC14-AUTH-TOKEN-INVALID-REBOOTSTRAP` | Send a client back to bootstrapping when its token is invalid | mandatory | yes | behaviour-tested | `test_invalid_token_sends_the_client_back_to_bootstrapping` | — |

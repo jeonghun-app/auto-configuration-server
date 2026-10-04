@@ -88,13 +88,7 @@ def test_factory_builds_the_aws_providers(aws_env: None, store: MemoryStore) -> 
 
 
 # ------------------------------------------------------------------- SMPP
-def test_smpp_sender_is_explicitly_unimplemented() -> None:
-    # Silently downgrading to text SMS would make the ACS look healthy while the
-    # RCS client waits forever for a message it can read.
-    with pytest.raises(NotImplementedError, match="operator SMSC"):
-        SmppSmsSender().send(SmsRequest(msisdn=MSISDN, body="x", sms_port=37273))
-
-
+# The session itself is tested against a fake SMSC in tests/test_smpp.py.
 def test_port_addressing_udh_is_built_correctly() -> None:
     # 06 05 04 <dest hi> <dest lo> <src hi> <src lo>
     assert SmppSmsSender.build_udh(37273) == bytes([0x06, 0x05, 0x04, 0x91, 0x99, 0x00, 0x00])

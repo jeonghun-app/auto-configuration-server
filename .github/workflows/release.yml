@@ -1,0 +1,193 @@
+name: Release
+
+# A release is a tag. Pushing vX.Y.Z runs the full check, refuses a tag that does
+# not match the declared version or has no CHANGELOG section, publishes a
+# multi-arch image to GHCR, and creates the GitHub Release from that section.
+# The procedure and the rollback are in docs/releasing.md.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+# Two pushes of the same tag must not race each other into the registry, and a
+# release half-way through publishing must not be cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: '3.11'
+  IMAGE: ghcr.io/jeonghun-app/auto-configuration-server
+
+jobs:
+  verify:
+    name: Verify the tag and run the full check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      latest: ${{ steps.latest.outputs.latest }}
+    steps:
+      # Actions are pinned to a commit SHA rather than a tag: a tag can be moved.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: needed to confirm the tag is on main and to
+          # decide whether this release becomes "latest".
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Tag matches pyproject.toml, the package and CHANGELOG.md
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py verify "$TAG"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Tagged commit is on main
+        run: |
+          set -euo pipefail
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main; release only merged commits"
+            exit 1
+          fi
+
+      - name: Decide whether this is the newest release
+        id: latest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # A patch to an older line (say v1.2.1 after v1.3.0) must not move
+          # "latest" backwards.
+          newest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
+          if [[ "$newest" == "$TAG" ]]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            echo "$TAG is not the newest tag ($newest); latest will not move"
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          make install
+
+      - name: make check
+        run: make check
+
+  image:
+    name: Build and push the image
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        env:
+          # Put the annotations on the multi-arch index too, which is what GHCR
+          # displays for a package.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: manifest,index
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ needs.verify.outputs.latest == 'true' }}
+          labels: |
+            org.opencontainers.image.title=GSMA RCS Auto Configuration Server
+            org.opencontainers.image.description=RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+          annotations: |
+            org.opencontainers.image.description=RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
+          provenance: mode=max
+          sbom: true
+
+  release:
+    name: Create the GitHub Release
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python scripts/release_notes.py notes "$VERSION" \
+            --image "$IMAGE" --digest "$DIGEST" --repo-url "$REPO_URL" > notes.md
+          cat notes.md
+
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          LATEST: ${{ needs.verify.outputs.latest }}
+        run: |
+          set -euo pipefail
+          # Re-running the workflow for the same tag updates the notes rather
+          # than failing on an existing release.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" --notes-file notes.md --latest="$LATEST"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "$TAG" --notes-file notes.md --latest="$LATEST"
+          fi

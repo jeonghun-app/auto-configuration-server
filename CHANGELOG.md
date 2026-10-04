@@ -61,8 +61,9 @@ now published from a tag, with a container image on GHCR.
   `system_id` and SMSC range; the tasks gain one egress rule, to that range on the
   SMPP port only; the password is a stack secret (`SmppPasswordSecretArn` output)
   injected through ECS Secrets. `scripts/deploy.sh` gains `--smpp-host`,
-  `--smpp-port`, `--smpp-system-id`, `--smpp-cidr` and `--smpp-tls`, and never
-  takes the password as a flag.
+  `--smpp-port`, `--smpp-system-id`, `--smpp-cidr` and `--smpp-tls`, never
+  takes the password as a flag, and prints how to store it through a private
+  temporary file that is removed even if the put fails.
 - Metrics `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`.
 - **Releases from a tag.** Pushing `vX.Y.Z` runs `make check`, refuses a tag that
   differs from the declared version, has no CHANGELOG section or is not on `main`,
@@ -147,7 +148,8 @@ now published from a tag, with a container image on GHCR.
   and the challenge stayed, holding the resend cooldown for a code that was never
   sent. It now takes the same path as an SMSC failure: `503`,
   `detail=otp_delivery_failed`, `Retry-After: 60`, `OtpDeliveryFailed`, and the
-  challenge deleted (#35).
+  challenge deleted (#35). The log keeps the AWS error code and request id, not
+  the AWS message, which can echo the destination number.
 - A failed SMS send deleted whichever challenge the MSISDN held by then. The send
   can take seconds, so a late failure could delete a newer challenge whose code
   was already on its way. Only the challenge issued for that send is deleted now.

@@ -343,6 +343,11 @@ def encode(
         root = ElementTree.fromstring(payload, parser=ElementTree.XMLParser(target=_TreeBuilder()))
     except ElementTree.ParseError as exc:
         raise WbxmlError("malformed XML for WBXML encoding") from exc
+    except WbxmlError:
+        raise
+    except (LookupError, ValueError) as exc:
+        # expat rejects an unknown or multi-byte encoding declaration with these.
+        raise WbxmlError("unsupported XML encoding for WBXML encoding") from exc
     namespace, _, name = root.tag.rpartition("}")
     namespace = namespace.removeprefix("{")
     if name != "SyncML":

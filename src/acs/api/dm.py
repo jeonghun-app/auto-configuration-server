@@ -7,6 +7,7 @@ emitted during RCS provisioning, so the same ACS deployment serves both planes.
 from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response
+from starlette.requests import ClientDisconnect
 
 from acs.api.deps import AppState
 from acs.observability import get_logger
@@ -23,10 +24,16 @@ MAX_BODY_BYTES = 512 * 1024
 async def dm_session(request: Request) -> Response:
     app_state: AppState = request.app.state.acs
     payload = bytearray()
-    async for chunk in request.stream():
-        if len(chunk) > MAX_BODY_BYTES - len(payload):
-            return Response(status_code=413)
-        payload.extend(chunk)
+    try:
+        async for chunk in request.stream():
+            if len(chunk) > MAX_BODY_BYTES - len(payload):
+                return Response(status_code=413)
+            payload.extend(chunk)
+    except ClientDisconnect:
+        # A device that drops mid-body is routine on a cellular link; nobody is
+        # left to answer, and it must not surface as an unhandled ASGI error.
+        log.info("dm client disconnected before the body was complete")
+        return Response(status_code=400)
 
     outcome = app_state.dm.handle(bytes(payload), request.headers.get("content-type", ""))
     app_state.metrics.emit(

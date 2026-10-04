@@ -472,3 +472,21 @@ async def test_the_dm_route_stops_reading_as_soon_as_the_body_limit_is_exceeded(
     response = await dm_session(request)
     assert response.status_code == 413
     assert calls == 2
+
+
+async def test_a_client_that_disconnects_mid_body_is_not_an_unhandled_error(
+    dm_app: FastAPI,
+) -> None:
+    messages = iter(
+        [
+            {"type": "http.request", "body": b"\x03\x01", "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+    )
+
+    async def receive() -> dict[str, object]:
+        return next(messages)
+
+    request = Request({"type": "http", "app": dm_app}, receive)
+    response = await dm_session(request)
+    assert response.status_code == 400

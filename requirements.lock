@@ -15,7 +15,7 @@ pydantic==2.10.4
 pydantic_core==2.27.2
 python-dateutil==2.9.0.post0
 python-dotenv==1.2.4
-python-multipart==0.0.20
+python-multipart==0.0.31
 s3transfer==0.10.4
 six==1.17.0
 starlette==1.7.0

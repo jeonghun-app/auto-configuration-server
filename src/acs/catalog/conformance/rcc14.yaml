@@ -364,6 +364,7 @@ requirements:
     tests:
       - tests/test_otp.py::test_valid_otp_verifies_once
       - tests/test_provisioning_service.py::test_otp_verification_consumes_the_challenge
+      - tests/test_otp_atomicity.py::test_one_code_verifies_once_under_concurrent_requests
 
   - id: RCC14-AUTH-OTP-ABUSE
     title: Bound OTP sends and verification attempts
@@ -377,7 +378,12 @@ requirements:
       - tests/test_otp.py::test_daily_quota_stops_sms_pumping
       - tests/test_otp.py::test_attempts_are_bounded
       - tests/test_otp.py::test_resend_within_the_cooldown_is_blocked
-    note: An unbounded OTP endpoint is a direct financial attack on the operator.
+      - tests/test_otp_atomicity.py::test_concurrent_issues_never_exceed_the_daily_cap
+      - tests/test_otp_atomicity.py::test_concurrent_wrong_guesses_each_spend_an_attempt
+    note: >
+      An unbounded OTP endpoint is a direct financial attack on the operator. The
+      limits are enforced by atomic store operations (conditional writes on
+      DynamoDB), so concurrent requests, also across tasks, cannot exceed them.
 
   - id: RCC14-AUTH-OTP-PORT
     title: Deliver the OTP as a port-addressed binary SMS when SMS_port is given

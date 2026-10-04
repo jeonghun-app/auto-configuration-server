@@ -84,16 +84,6 @@ def create_challenge(
     repeated identical bootstrap requests do not each cost an SMS.
     """
     current = now or int(time.time())
-
-    existing = store.get_otp(msisdn)
-    if existing and not existing.consumed and not existing.expired(current):
-        age = current - existing.created_at
-        if age < policy.resend_cooldown_seconds:
-            raise SendBlocked("cooldown", retry_after=policy.resend_cooldown_seconds - age)
-
-    if store.count_otp_sends_today(msisdn) >= policy.max_sends_per_day:
-        raise SendBlocked("daily_quota", retry_after=3600)
-
     otp = generate_otp(policy.length)
     challenge = OtpChallenge(
         msisdn=msisdn,
@@ -103,9 +93,21 @@ def create_challenge(
         expires_at=current + policy.ttl_seconds,
         sms_port=sms_port,
     )
-    store.put_otp(challenge)
-    store.record_otp_send(msisdn)
+    refused = store.issue_otp(
+        challenge,
+        cooldown_seconds=policy.resend_cooldown_seconds,
+        max_sends_per_day=policy.max_sends_per_day,
+        now=current,
+    )
+    if refused is not None:
+        raise SendBlocked(refused.reason, retry_after=refused.retry_after)
     return challenge, otp
+
+
+# Rounds of compare-and-swap before giving up. Each lost round means another
+# request for the same MSISDN changed the challenge first, so contention this
+# high is a guessing attack and the answer is "not verified".
+_VERIFY_ROUNDS = 5
 
 
 def verify_challenge(
@@ -117,35 +119,40 @@ def verify_challenge(
 ) -> OtpOutcome:
     """Verify and atomically consume an OTP.
 
+    Every change goes through :meth:`Store.replace_otp`, conditioned on the
+    challenge being unchanged since it was read, so concurrent requests can
+    neither verify one code twice nor spend the same attempt twice.
+
     Every failure path is indistinguishable to the caller in terms of HTTP
     response, so this function's detailed outcome is for metrics and logs only —
     it must not leak whether the MSISDN is known.
     """
     current = now or int(time.time())
-    challenge = store.get_otp(msisdn)
-    if challenge is None:
-        return NO_CHALLENGE
-    if challenge.consumed:
-        return CONSUMED
-    if challenge.expired(current):
-        store.delete_otp(msisdn)
-        return EXPIRED
-    if challenge.attempts >= policy.max_attempts:
-        store.delete_otp(msisdn)
-        return EXHAUSTED
-
-    challenge.attempts += 1
-    if not hmac.compare_digest(challenge.otp_hash, hash_otp(msisdn, otp)):
+    for _ in range(_VERIFY_ROUNDS):
+        challenge = store.get_otp(msisdn)
+        if challenge is None:
+            return NO_CHALLENGE
+        if challenge.consumed:
+            return CONSUMED
+        if challenge.expired(current):
+            store.replace_otp(challenge, None)
+            return EXPIRED
         if challenge.attempts >= policy.max_attempts:
-            store.delete_otp(msisdn)
+            store.replace_otp(challenge, None)
             return EXHAUSTED
-        store.put_otp(challenge)
-        return MISMATCH
 
-    challenge.consumed = True
-    store.put_otp(challenge)
-    store.delete_otp(msisdn)
-    return VERIFIED
+        attempts = challenge.attempts + 1
+        replacement: OtpChallenge | None
+        if hmac.compare_digest(challenge.otp_hash, hash_otp(msisdn, otp)):
+            outcome, replacement = VERIFIED, None
+        elif attempts >= policy.max_attempts:
+            outcome, replacement = EXHAUSTED, None
+        else:
+            outcome = MISMATCH
+            replacement = dataclasses.replace(challenge, attempts=attempts)
+        if store.replace_otp(challenge, replacement):
+            return outcome
+    return MISMATCH
 
 
 def policy_from_settings(settings: object) -> OtpPolicy:

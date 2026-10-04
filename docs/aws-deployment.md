@@ -15,6 +15,7 @@ destroys the images it was running. Immutable tags, scan on push, lifecycle poli
 | DynamoDB gateway VPC endpoint | Free, and keeps table traffic off the internet |
 | DynamoDB table + `gsi1` + TTL on `expires_at` | `PAY_PER_REQUEST`, encrypted, PITR on, `DeletionPolicy: Retain` |
 | Secrets Manager: admin token, PII hash key | Generated, never in the template |
+| Secrets Manager: SMPP password (only with `SmsProvider=smpp`) | Created with a random placeholder; the operator-issued value is put in after the first deploy |
 | ECS Fargate cluster, task definition, service | Read-only root filesystem, non-root user |
 | Application Load Balancer + target group | Health check on `/healthz` |
 | HTTPS listener (with a certificate) | `ELBSecurityPolicy-TLS13-1-2-2021-06`; HTTP redirects to HTTPS |
@@ -37,6 +38,37 @@ scripts/deploy.sh \
 
 Idempotent. Re-running with the same tag reuses the image in ECR, since tags are
 immutable and a re-push would fail.
+
+Every run passes every stack parameter the script knows, so a flag left off a
+later run resets that parameter to the script's default. Repeat the full set each
+time.
+
+### Port-addressed OTP through an operator SMSC
+
+AWS SMS cannot send the port-addressed binary SMS RCC.14 uses for silent OTP
+delivery. An operator SMSC over SMPP 3.4 can:
+
+```bash
+scripts/deploy.sh \
+  --allowed-cidr 203.0.113.10/32 \
+  --certificate-arn arn:aws:acm:ap-northeast-2:123456789012:certificate/abc123 \
+  --sms-provider smpp \
+  --smpp-host smsc.operator.example \
+  --smpp-port 3550 \
+  --smpp-system-id acs01 \
+  --smpp-cidr 198.51.100.0/28
+```
+
+The template refuses `smpp` without a host, `system_id` and SMSC range. The tasks
+gain one egress rule, to `--smpp-cidr` on `--smpp-port` only, and lose the AWS SMS
+permissions. TLS is on by default because SMPP sends the password in clear; pass
+`--smpp-tls false` only when the SMSC is reached over a private link.
+
+The password is never a flag. The stack creates the `SmppPasswordSecretArn` secret
+with a random placeholder, so every OTP answers `503` until the operator-issued
+value is put into it and the service is redeployed — see
+[runbook.md](runbook.md#setting-or-rotating-the-smpp-password). This path has been
+tested only against a fake SMSC; see [limitations.md](limitations.md).
 
 ### Why `--allowed-cidr` is mandatory
 
@@ -88,7 +120,7 @@ calculator for anything you will be billed for.
 | Fargate | 2 tasks × 0.5 vCPU / 1 GB, billed per second |
 | DynamoDB | On-demand; a provisioning request is a handful of requests |
 | CloudWatch Logs | Ingestion and storage; retention is the lever |
-| Secrets Manager | Per secret per month, two secrets |
+| Secrets Manager | Per secret per month, two secrets (three with SMPP) |
 | ECR | Storage for retained images |
 | SMS | Per message, and this is the one an attacker can drive |
 
@@ -102,7 +134,8 @@ No NAT gateway is created, which is a deliberate saving — see below.
 **Default: tasks in public subnets with public IPs.** A public IP is required to
 pull from ECR without a NAT gateway. The task security group has **no inbound rule
 except from the load balancer's security group**, so the tasks are not reachable
-from the internet. Egress is restricted to TCP 443.
+from the internet. Egress is restricted to TCP 443, plus the SMPP port to the SMSC
+range when `SmsProvider=smpp`.
 
 **Hardened: tasks in private subnets.** Two options, both costing more:
 
@@ -142,9 +175,16 @@ Namespace `RcsAcs`, dimensions `Environment` and `Outcome` only. Subscriber
 identifiers are never dimensions: that would be both a leak and an unbounded bill.
 
 Metrics emitted: `ConfigServed`, `ConfigUnchanged`, `ConfigDisabled`, `OtpSent`,
-`OtpPendingReuse`, `OtpRateLimited`, `OtpDeliveryUnsupported`, `Rejected403`,
-`Challenge511`, `GbaChallenge`, `MalformedRequest`, `ConfigBytes`, and the `Dm*`
-family.
+`OtpPendingReuse`, `OtpRateLimited`, `OtpDeliveryUnsupported`, `OtpDeliveryFailed`,
+`OtpStoreContention`, `Rejected403`, `Challenge511`, `GbaChallenge`,
+`MalformedRequest`, `ConfigBytes`, and the `Dm*` family, including
+`DmEncodingError`.
+
+The stack's three alarms do not cover `OtpDeliveryFailed`, `OtpStoreContention` or
+`DmEncodingError`. Each is answered with a `5xx`, so the 5xx-rate alarm sees a
+sustained burst; add a dedicated alarm if one of them should page on its own.
+Alarms for them in the stack are tracked in #31.
+[runbook.md](runbook.md#otp-delivery-failing) says what each means.
 
 ## IAM
 
@@ -153,10 +193,15 @@ The task role is scoped to:
 - the one DynamoDB table and its one index — `GetItem`, `PutItem`, `UpdateItem`,
   `DeleteItem`, `Query`, `DescribeTable`;
 - `sms-voice:SendTextMessage` and `sns:Publish`. Sending to a phone number has no
-  resource ARN to scope to, so the permission is narrowed to those two actions.
+  resource ARN to scope to, so the permission is narrowed to those two actions,
+  and it is not granted at all with `SmsProvider=smpp`.
 
-The execution role adds only `secretsmanager:GetSecretValue` on the two secrets
-this stack creates, on top of the managed ECS execution policy.
+OTP issue uses `TransactWriteItems`, which needs no action of its own: it is
+authorised by `PutItem` on the table.
+
+The execution role adds only `secretsmanager:GetSecretValue` on the secrets this
+stack creates (two, or three with SMPP), on top of the managed ECS execution
+policy.
 
 ## Tearing down
 
@@ -174,7 +219,8 @@ prints the exact commands to remove each, which are irreversible.
 - [ ] `make check` passes locally
 - [ ] `--allowed-cidr` is your address range, not `0.0.0.0/0`
 - [ ] ACM certificate issued and validated
-- [ ] SMS origination identity provisioned, and out of the SMS sandbox
+- [ ] SMS origination identity provisioned, and out of the SMS sandbox — or, with
+      `smpp`, the operator's SMSC account, address range and password in hand
 - [ ] SMS spending limit set on the account
 - [ ] WAF rate-based rule in front if the service is internet-facing
 - [ ] Alarm actions wired to an SNS topic someone reads

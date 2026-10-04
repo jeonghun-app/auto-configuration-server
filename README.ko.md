@@ -1,7 +1,9 @@
 # GSMA RCS 자동 설정 서버 (ACS)
 
 [![CI](https://github.com/jeonghun-app/auto-configuration-server/actions/workflows/ci.yml/badge.svg)](https://github.com/jeonghun-app/auto-configuration-server/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jeonghun-app/auto-configuration-server?sort=semver)](https://github.com/jeonghun-app/auto-configuration-server/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](pyproject.toml)
 
 GSMA RCS용 컨테이너 기반 자동 설정 서버(ACS)이며, AWS에 명령 한 번으로 배포됩니다.
 
@@ -12,7 +14,7 @@ GSMA RCS용 컨테이너 기반 자동 설정 서버(ACS)이며, AWS에 명령 �
 | 평면 | 프로토콜 | 역할 |
 | --- | --- | --- |
 | **RCS 설정** | GSMA RCC.14 HTTP 플로우, OMA Client Provisioning (`wap-provisioningdoc` 1.1) | RCS 클라이언트 프로비저닝: IMS 식별자, 메시징, 파일 전송, 능력 발견, 챗봇 |
-| **단말 관리** | OMA-DM, SyncML DM 1.2 | 부트스트랩 이후 VoLTE 설정과 단말 인벤토리 관리. YAML 관리 객체(MO)만 추가하면 확장됨 |
+| **단말 관리** | OMA-DM, SyncML DM 1.2 (XML 또는 WBXML) | 부트스트랩 이후 VoLTE 설정과 단말 인벤토리 관리. YAML 관리 객체(MO)만 추가하면 확장됨 |
 
 두 평면은 연결되어 있습니다. OMA-CP 문서에 OMA-DM 계정을 부트스트랩하는 `w7`
 characteristic이 포함되므로, RCS 프로비저닝을 받은 단말은 곧바로 DM 세션으로
@@ -24,7 +26,7 @@ characteristic이 포함되므로, RCS 프로비저닝을 받은 단말은 곧�
 
 ```bash
 make install                 # .venv 생성 및 의존성 설치
-make test                    # 테스트 490개
+make test                    # 전체 테스트
 make docker-run              # 컨테이너 빌드 후 :8080 에서 실행
 make verify                  # 두 평면의 종단간 검증
 ```
@@ -45,6 +47,24 @@ make verify
 make down
 ```
 
+## 컨테이너 이미지
+
+릴리스마다 GitHub Container Registry에 멀티 아키텍처 이미지(`linux/amd64`,
+`linux/arm64`)가 SBOM, provenance와 함께 게시됩니다.
+
+```bash
+docker pull ghcr.io/jeonghun-app/auto-configuration-server:1.4.0
+docker run --rm -p 8080:8080 \
+  -e ACS_ENV=dev -e ACS_STORE_BACKEND=memory -e ACS_SMS_PROVIDER=mock \
+  -e ACS_ADMIN_TOKEN=local-admin-token \
+  ghcr.io/jeonghun-app/auto-configuration-server:1.4.0
+```
+
+`X.Y.Z` 태그는 덮어쓰지 않으며, `X.Y`와 `latest`는 최신 릴리스를 따라갑니다.
+배포에는 릴리스 노트에 적힌 다이제스트를 고정해 쓰십시오. 위 설정은 로컬 시험용이며,
+staging과 production은 인메모리 저장소와 모의 SMS 프로바이더를 거부합니다. 릴리스
+절차는 [docs/releasing.md](docs/releasing.md)에 있습니다.
+
 ## AWS 배포
 
 모든 백엔드 구성요소가 AWS 관리형 서비스입니다.
@@ -54,10 +74,10 @@ make down
 | 컴퓨팅 | ECS Fargate |
 | 인그레스 / TLS | Application Load Balancer + ACM |
 | 상태 저장 | DynamoDB (단일 테이블, OTP·DM 세션은 TTL로 자동 만료) |
-| 비밀 | Secrets Manager (관리 토큰, PII 해시 키) |
+| 비밀 | Secrets Manager (관리 토큰, PII 해시 키, SMPP 사용 시 SMSC 비밀번호) |
 | 로그 | CloudWatch Logs (구조화 JSON) |
 | 지표 | CloudWatch, stdout의 EMF 형식 — `PutMetricData` 호출 없음 |
-| SMS | AWS End User Messaging SMS 또는 Amazon SNS |
+| SMS | 텍스트 OTP는 AWS End User Messaging SMS 또는 Amazon SNS, 포트 지정 OTP는 SMPP 3.4로 사업자 SMSC |
 | 레지스트리 | ECR (태그 불변, 푸시 시 스캔) |
 | 인프라 | CloudFormation |
 
@@ -165,14 +185,15 @@ IMEI, MSISDN을 받고, 악용 시 실제 비용이 발생하는 OTP 엔드포�
 
 | 규격 | 요구사항 | 구현 | 부분 | 미구현 | 필수 미충족 |
 | --- | --- | --- | --- | --- | --- |
-| OMA-DM 1.2 (서버 역할) | 58 | 37 | 5 | 16 | 10 |
-| RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 9 | 3 | 7 |
-| **합계** | **113** | **80** | **14** | **19** | **17** |
+| OMA-DM 1.2 (서버 역할) | 58 | 37 | 6 | 15 | 10 |
+| RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 10 | 2 | 7 |
+| **합계** | **113** | **80** | **16** | **17** | **17** |
 
 **정직한 답은 "상당 부분 수용했고, 빠진 것은 다음과 같다"입니다.**
 `scripts/gen_conformance.py --strict`는 이 17건이 남아 있는 동안 0이 아닌 값으로
-종료합니다. 큰 항목은 WBXML SyncML 인코딩, MaxMsgSize 메시지 분할, DM ACL,
-서버→클라이언트 DM 인증, MSISDN 복구 플로우 완성입니다.
+종료합니다. 큰 항목은 MaxMsgSize 메시지 분할, DM ACL, 서버→클라이언트 DM 인증,
+MSISDN 복구 플로우 완성, 그리고 텍스트 값 범위를 넘어서는 WBXML입니다(WBXML은
+1.4.0부터 지원하지만 `partial`이므로 여전히 미충족으로 셉니다).
 
 "구현됨"이 "인증됨"으로 읽히지 않도록 네 축을 분리했습니다. 요구사항의 **수준**,
 그 수준을 라이선스 판본과 **교차 확인**했는지(전부 아니오 — 적합성 요구사항 표를
@@ -199,6 +220,11 @@ DM 평면은 `src/acs/catalog/omadm/`의 관리 객체 정의로 동작합니다
 인벤토리를 구성하고, `source: server` 노드는 `Replace`로 내려보냅니다. 펌웨어
 업데이트(FUMO), 벤더 MO, VoLTE 파라미터 추가는 YAML 파일 추가만으로 끝나며 서버
 코드는 바꾸지 않습니다. `GET /dm/mo`가 적재된 목록을 보여줍니다.
+
+세션은 XML과 WBXML(`application/vnd.syncml.dm+wbxml`) 모두 받으며, 요청이 온
+인코딩으로 응답합니다. WBXML 코덱은 텍스트 값으로 이루어진 SyncML·MetInf 범위를
+다룹니다. 바이너리 `OPAQUE`와 드물게 쓰이는 WBXML 구성은 `400`으로 거부하며,
+클라이언트의 `MaxMsgSize`에 맞춘 응답 분할은 아직 하지 않습니다.
 
 자세한 내용: [docs/oma-dm.md](docs/oma-dm.md).
 
@@ -240,7 +266,9 @@ DM 평면은 `src/acs/catalog/omadm/`의 관리 객체 정의로 동작합니다
 - **ALB 액세스 로그 기본 비활성.** RCC.14 요청 라인에는 IMSI, IMEI, MSISDN, OTP,
   토큰이 들어 있어 활성화하면 가입자 데이터 버킷이 만들어집니다.
 - **OTP 악용 통제.** MSISDN별 쿨다운, 일일 상한, 검증 시도 제한, 1회용,
-  상수 시간 비교, 발송량 CloudWatch 알람.
+  상수 시간 비교, 발송량 CloudWatch 알람. 발급과 소진은 저장소에서 원자적으로
+  처리되므로, 여러 태스크에 걸친 동시 요청도 한도를 넘기거나 같은 코드를 두 번
+  검증할 수 없습니다.
 - **토큰은 해시 저장**, IMSI·IMEI에 바인딩, 개별 폐기 가능.
 - **가입자 열거 불가.** 알려진 신원과 미지의 신원이 동일한 응답 형태를 받습니다.
 - **XXE 차단.** 두 XML 파서 모두. 문서는 문자열 템플릿이 아니라 `lxml`로 생성.
@@ -251,13 +279,35 @@ DM 평면은 `src/acs/catalog/omadm/`의 관리 객체 정의로 동작합니다
 
 | 항목 | 이유 | 대신 제공하는 것 |
 | --- | --- | --- |
-| 포트 지정(무음) OTP SMS | UDH를 지원하는 사업자 SMSC(SMPP)가 필요. AWS SMS 서비스로는 불가 | 인터페이스가 `SMS_port`를 끝까지 전달하고, AWS 프로바이더는 강등 대신 거부하며, `SmppSmsSender.build_udh()`가 헤더를 구현 |
+| 검증된 포트 지정(무음) OTP SMS | 사업자 SMSC 계정과 실제 단말이 필요. AWS SMS 서비스로는 보낼 수 없음 | 가짜 SMSC를 상대로 옥텟 단위까지 검증한 SMPP 3.4 클라이언트(`ACS_SMS_PROVIDER=smpp`). AWS 프로바이더는 강등 대신 거부 |
+| 서버 개시 DM 세션 | DM 알림(WAP Push 또는 트리거 SMS)이 필요하나, 이를 만드는 기능이 없음 | 다른 수단으로 단말을 깨웠다면 `Alert` 1200은 받아들임 |
 | 실제 GBA / AKA | USIM, Ub·Zn 상의 BSF, HSS 필요 | HTTP 챌린지/응답 형태, `BsfClient` 포트, 결정적 모의 구현 |
 | 실제 사업자 헤더 강화 | 사업자 패킷 게이트웨이 필요 | 신뢰 프록시로 제한된 헤더, 기본 비활성 |
 | `config.rcs.mncXXX.mccYYY.pub.3gppnetwork.org` 로 접근 가능 | 해당 DNS 존은 사업자와 GSMA가 관리 | 배포 출력이 생성해야 할 CNAME을 안내 |
 | 실제 단말 | CI에서 사용 불가 | 규격 위반 시 빌드를 실패시키는 프로토콜 정확 시뮬레이터 2종 |
 
 전체 목록: [docs/limitations.md](docs/limitations.md).
+
+## 설정
+
+모든 설정은 `ACS_` 접두사가 붙은 환경 변수로 받습니다. 전체 목록은
+[.env.example](.env.example)에 있습니다. 중요한 기본값:
+
+| 변수 | 기본값 | 이유 |
+| --- | --- | --- |
+| `ACS_ADMIN_TOKEN` | *(비어 있음)* | 설정 전까지 관리 API 비활성 |
+| `ACS_TRUSTED_PROXY_CIDRS` | *(비어 있음)* | 헤더 강화 식별 비활성. 신뢰하지 않는 피어의 식별 헤더는 위조 가능 |
+| `ACS_GBA_ENABLED` | `false` | GBA에는 실제 BSF가 필요. 없이 production에서 켜면 부트스트랩을 흉내 내지 않고 fail-closed |
+| `ACS_DEV_ENDPOINTS_ENABLED` | `false` | 모의 SMS 발신함은 production에 절대 존재하면 안 됨 |
+| `ACS_PII_LOG_MODE` | `mask` | 가입자 식별자를 평문으로 로깅하지 않음 |
+| `ACS_DEFAULT_COUNTRY_CODE` | *(비어 있음)* | 국내 형식 MSISDN은 추측하지 않고 거부. 국가를 추측하면 엉뚱한 가입자를 프로비저닝함. 한국은 `82` |
+| `ACS_STORE_BACKEND` | `memory` | staging/prod에서 거부. 태스크가 둘 이상이 되는 순간 인메모리 OTP 상태가 깨짐 |
+| `ACS_SMS_PROVIDER` | `mock` | staging/prod에서 거부. `eum`, `sns`는 텍스트 OTP만 보내며, 포트 지정 OTP를 보낼 수 있는 것은 `smpp`뿐 |
+| `ACS_SMPP_TLS` | `true` | SMPP는 비밀번호를 평문으로 보냄. SMSC와의 전용 회선에서만 끌 것. staging/prod에서는 호스트, `system_id`, 비밀번호가 필수 |
+| `ACS_SMPP_TIMEOUT_SECONDS` | `10` | SMSC 응답 하나당. 단말의 HTTP 요청이 이를 기다리므로 최대 60 |
+
+환경에 안전하지 않은 설정이면 시작 단계 검증이 기동을 거부합니다. 잘못 설정된
+채로 뜬 ACS는 접속하는 모든 단말의 RCS를 꺼 버릴 수 있습니다.
 
 ## 검증
 
@@ -266,19 +316,39 @@ make check      # lint + mypy strict + 커버리지 게이트 테스트 + cfn-li
                 # + shellcheck + 규격 커버리지 최신성
 ```
 
-이 저장소에서 실제 측정한 결과:
+현재 상태입니다. 정확한 수치는 각 CI 실행 기록에 있습니다.
 
 | 항목 | 결과 |
 | --- | --- |
-| `pytest` | 490 통과 |
-| 커버리지 | 93% |
-| `mypy --strict` | 소스 46개 파일 이상 없음 |
+| `pytest` | 전부 통과 |
+| 커버리지 | 게이트 88% 이상 |
+| `mypy --strict` | 소스 트리 전체 이상 없음 |
 | `ruff` (lint + format) | 이상 없음 |
 | `cfn-lint` | 이상 없음 |
 | 컨테이너 | 빌드 성공, UID 10001로 실행, `/healthz` 200 |
 | 종단간 (인메모리 백엔드) | 32개 검사 통과 |
 | 종단간 (DynamoDB 백엔드, 컨테이너) | 32개 검사 통과 |
 | 종단간 (실제 AWS: ECS Fargate + ALB + DynamoDB) | 29개 검사 통과 |
+
+## 문서
+
+| 문서 | 내용 |
+| --- | --- |
+| [docs/scope.md](docs/scope.md) | 합의된 범위: 포함, 제외, 할 수 없는 것 |
+| [docs/protocol.md](docs/protocol.md) | 전송 수준의 RCC.14 동작 |
+| [docs/oma-dm.md](docs/oma-dm.md) | DM 세션 흐름, WBXML, 관리 객체 추가 방법 |
+| [docs/spec-coverage.md](docs/spec-coverage.md) | 생성된 파라미터 커버리지 보고서 |
+| [docs/conformance.md](docs/conformance.md) | 두 규격의 요구사항별 적합성 레지스트리(생성됨) |
+| [docs/aws-deployment.md](docs/aws-deployment.md) | 배포, 비용, 강화 |
+| [docs/limitations.md](docs/limitations.md) | 이 프로젝트가 할 수 없는 모든 것 |
+| [docs/threat-model.md](docs/threat-model.md) | 자산, 공격자, 완화책 |
+| [docs/runbook.md](docs/runbook.md) | 운영 절차 |
+| [docs/releasing.md](docs/releasing.md) | 버전 규칙, 릴리스 절차, GHCR 이미지, 롤백 |
+| [docs/adr/](docs/adr/) | 아키텍처 결정 기록 |
+| [CHANGELOG.md](CHANGELOG.md) | 릴리스별 변경 사항과 업그레이드 안내 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 개발 환경, 풀 리퀘스트가 통과해야 할 검사, 코드 관례 |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
+| [SECURITY.md](SECURITY.md) | 취약점 비공개 제보 |
 
 ## 라이선스
 

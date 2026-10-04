@@ -91,6 +91,7 @@ against inventing specification content is enforced by the build.
 - A declarative management object tree: DevInfo, DevDetail, the 3GPP IMS MO
   including the VoLTE parameters, and an RCS extension MO.
 - Device inventory built from `Get`/`Results`.
+- XML and WBXML encodings (the text-valued SyncML and MetInf subset).
 - Session state in the shared store so a session survives load balancing.
 
 **Operations**
@@ -115,14 +116,15 @@ Out of scope because they are different products, not because they are hard:
 | File transfer HTTP content server | Content server (the ACS only provisions its URI) |
 | Chatbot platform and directory | Chatbot infrastructure |
 | Firmware images and delivery | FUMO plus a content server; the MO can be added as YAML |
-| WBXML encoding of SyncML | Refused explicitly with `415` rather than answered wrongly |
-| Server-initiated DM notification (WAP Push / SMS trigger) | Needs an operator SMSC; `Alert` 1200 is accepted if a client starts the session |
+| Server-initiated DM notification (WAP Push / SMS trigger) | The SMPP client sends only the OTP; nothing builds or sends a DM notification. `Alert` 1200 is accepted if a client starts the session |
+| WBXML beyond text-valued SyncML | Binary `OPAQUE`, attributes, literal tags, extensions and other code pages are refused with `400` rather than guessed at |
 
 ## Cannot be done in any environment without an operator network
 
 See [limitations.md](limitations.md) for the full treatment. Summary:
 
-- Port-addressed binary OTP SMS (no AWS SMS service can set a UDH).
+- Port-addressed binary OTP SMS without an operator SMSC (no AWS SMS service can
+  set a UDH). The SMPP 3.4 client has been tested only against a fake SMSC.
 - Real GBA/AKA (needs a USIM, BSF and HSS).
 - Real header enrichment (needs an operator packet gateway).
 - Serving `config.rcs.mnc<MNC>.mcc<MCC>.pub.3gppnetwork.org` (operator/GSMA DNS).

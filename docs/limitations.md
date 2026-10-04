@@ -3,29 +3,45 @@
 An ACS that pretends to do something it cannot is worse than one that says so: a
 silent failure surfaces as handsets that never provision, and nobody knows why.
 
-## 1. Port-addressed (silent) OTP SMS cannot be sent from AWS
+## 1. Port-addressed (silent) OTP SMS needs an operator SMSC, and is unproven
 
 RCC.14 lets a client supply `SMS_port`. When it does, the OTP must arrive as a
 binary SMS carrying a User Data Header with that destination port, so the client
 reads it without the user seeing anything.
 
 Neither Amazon SNS nor AWS End User Messaging SMS can send a UDH. Only an
-operator SMSC over SMPP can.
+operator SMSC can, and since 1.4.0 this repository can talk to one over SMPP 3.4
+(`ACS_SMS_PROVIDER=smpp`, `src/acs/sms/smpp.py`):
 
-What this repository does instead:
+- One `bind_transceiver` / `submit_sm` / `unbind` session per message. With
+  `SMS_port` the message is 8-bit data (`data_coding` `0x04`) with UDHI set
+  (`esm_class` `0x40`) and the 16-bit application port header
+  (`06 05 04 <dest> <src>`) ahead of the OTP template.
+- Every failure — bind refused, an error status, `generic_nack`, a timeout, a
+  connection or TLS failure — answers `503` with `Retry-After: 60`, the metric
+  `OtpDeliveryFailed`, and the pending challenge deleted.
+- `SnsSmsSender` and `EndUserMessagingSender` still raise `UnsupportedDelivery`
+  for `SMS_port`: `503` with `Retry-After`, challenge deleted, rather than a text
+  message the client will never read.
 
-- `SMS_port` is parsed, validated, stored on the challenge and passed through the
-  `SmsSender` interface end to end.
-- `SnsSmsSender` and `EndUserMessagingSender` raise `UnsupportedDelivery`. The
-  service answers `503` with `Retry-After` and deletes the pending challenge,
-  rather than sending a text message the client will never read and leaving it
-  waiting forever.
-- `SmppSmsSender.build_udh()` implements the 16-bit application port addressing
-  header (`06 05 04 <dest> <src>`) and is unit tested, because that is the part
-  implementers most often get wrong. `send()` raises `NotImplementedError`.
+What is still not known or not done:
 
-To make it work you need an SMSC account and an SMPP client in
-`src/acs/sms/smpp.py`. Text OTP works today.
+- **It has been exercised only against the in-process fake SMSC** in
+  `tests/test_smpp.py`, which asserts the PDUs octet for octet. It has never
+  bound to an operator SMSC or delivered to a handset. SMSCs differ in TLS
+  support, `system_type`, TON/NPI expectations and how they treat 8-bit data, so
+  expect configuration work with the operator.
+- **The user data after the UDH is the configured OTP template**
+  (`ACS_SMS_OTP_TEMPLATE`). The format an RCS client expects in a port-addressed
+  OTP message is not taken from a pinned RCC.14 edition, so a client may receive
+  the message and fail to recognise the code.
+- **No concatenation.** A message longer than one SMS (133 octets of user data
+  with the port header, 160 GSM or 70 UCS-2 characters without) is refused rather
+  than split.
+- `RCC14-AUTH-OTP-PORT` is therefore `partial` in
+  [conformance.md](conformance.md), not implemented.
+
+Text OTP works with every provider.
 
 ## 2. GBA / AKA is an interface, not an implementation
 
@@ -97,19 +113,32 @@ Consequences to be honest about:
 
 This repository makes **no claim of GSMA certification**.
 
-## 7. WBXML is not supported
+## 7. WBXML is supported for text-valued SyncML only
 
-SyncML DM can be encoded as WBXML (`application/vnd.syncml.dm+wbxml`). Only the
-XML encoding is implemented. A WBXML request is refused with `415` rather than
-answered with XML the client cannot decode. Some production DM clients use WBXML
-exclusively, so this would need adding for those.
+SyncML DM can be encoded as WBXML (`application/vnd.syncml.dm+wbxml`). Since
+1.4.0 `POST /dm` accepts it and answers in the same encoding: WBXML 1.2 and 1.3,
+UTF-8, the SyncML and MetInf code pages, inline and string-table strings. See
+[oma-dm.md](oma-dm.md#wbxml-encoding).
+
+What it does not do:
+
+- **`OPAQUE` must hold UTF-8 text.** Binary opaque data, which a management object
+  with binary leaf values would need, is refused with `400`.
+- Attributes, literal tags, extension tokens, `ENTITY`, processing instructions
+  and other code pages are refused with `400` rather than guessed at.
+- It has been tested against fixed byte vectors, the repository's DM simulator
+  (`--wbxml`) and generated and mutated input, not against a real handset's DM
+  client.
 
 ## 8. No server-initiated DM session
 
-Waking a device for a management session needs a WAP Push or a trigger SMS
-through an operator SMSC — the same dependency as item 1. The server accepts an
-`Alert` 1200 (server-initiated) if something else started the session, but cannot
-originate the trigger.
+Waking a device for a management session needs an OMA-DM notification — a WAP
+Push or trigger SMS carrying the notification message — delivered to the handset.
+The SMPP client added in 1.4.0 can reach an operator SMSC, but it sends only the
+OTP: nothing builds the notification message, nothing addresses it to the WAP Push
+port, and there is no API or console action to start a session. The server accepts
+an `Alert` 1200 (server-initiated) if something else started the session, but
+cannot originate the trigger.
 
 ## 9. Operational limits
 
@@ -124,3 +153,12 @@ originate the trigger.
   service to the internet; the OTP endpoint costs money to abuse.
 - **HTTP without a certificate.** `scripts/deploy.sh` warns loudly. Serving RCC.14
   over cleartext exposes IMSI, IMEI, MSISDN, OTP and tokens on the wire.
+
+## 10. DM responses are not split to fit `MaxMsgSize`
+
+The client's `MaxMsgSize` is read, and the server never advertises more than the
+client accepts, but a response is not split across messages to stay under it: a
+package with many commands is sent whole, in XML and in WBXML. A device that
+negotiates a `MaxMsgSize` of 16384 has been seen to receive a 231,588-byte XML
+response, which a client enforcing its limit may reject. The WBXML encoder's output limits are resource bounds,
+not message splitting. Tracked in #20.

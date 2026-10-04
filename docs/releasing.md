@@ -17,6 +17,18 @@ depend on:
 | MINOR | New behaviour, endpoints, parameters, management objects or settings, with the previous behaviour still the default |
 | PATCH | Fixes, including security fixes, with no new interface |
 
+One further rule, added for 1.4.0 rather than read out of the table above:
+refusing input that never conformed to the documented contract, in order to apply
+a security fix, is MINOR, with an upgrade note in the CHANGELOG naming what is now
+refused. 1.4.0 applied it to `;` as a form-field separator, refused by the
+python-multipart security fix, and to a JSON body sent to the admin API without a
+JSON `Content-Type` (now `422`), refused by the FastAPI update in the same
+release; that one is not a security fix, and the rule was stretched to cover it
+because it refuses only requests that were already outside the contract. Without
+the rule, the MAJOR row's "incompatible change to the admin API" could be read to
+cover them. The rule does not narrow that row: refusing input the documentation allowed,
+or that a deployed handset sends, is still MAJOR.
+
 Only plain `X.Y.Z` is released. Pre-release tags (`v1.4.0-rc.1`) are refused by
 the workflow, so that a candidate can never move the `X.Y` or `latest` image tags.
 
@@ -226,9 +238,10 @@ Two cautions:
 
 - `deploy.sh` passes every application-stack parameter it knows on every run
   (`ImageUri`, `AllowedCidr`, `Environment`, `DesiredCount`, `SmsProvider`,
-  `SmsOriginationIdentity`, `CertificateArn`), so a parameter left out of a
-  rollback command reverts to the script's default, and a missing
-  `--certificate-arn` turns HTTPS off. Read the current values first, and repeat
+  `SmsOriginationIdentity`, the five `Smpp*` parameters, `CertificateArn`), so a
+  parameter left out of a rollback command reverts to the script's default: a
+  missing `--certificate-arn` turns HTTPS off, and a missing `--sms-provider smpp`
+  switches an SMPP stack back to `eum`. Read the current values first, and repeat
   them:
 
   ```bash

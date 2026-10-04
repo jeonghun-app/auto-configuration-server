@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -346,3 +347,254 @@ def test_the_image_state_cli(args: list[str], stdin: str, code: int, stdout: str
         check=False,
     )
     assert (result.returncode, result.stdout) == (code, stdout)
+
+
+# --- QA (issue #13): adversarial cases --------------------------------------
+
+_REAL_CHANGELOG = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+
+
+def _released_sections(text: str) -> list[tuple[str, list[str]]]:
+    """An independent oracle: split on '## [' lines and drop the link block.
+
+    Only valid for a CHANGELOG with no code fences, which the repository's is.
+    """
+    assert "```" not in text and "~~~" not in text
+    sections: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        if re.match(r"^\[[^\]]+\]: https?://", line):
+            break  # the link reference block ends the last section
+        if line.startswith("## ["):
+            sections.append((line[4 : line.index("]")], []))
+        elif sections:
+            sections[-1][1].append(line)
+    return sections
+
+
+@pytest.mark.parametrize(
+    "version", [name for name, _ in _released_sections(_REAL_CHANGELOG) if name != "Unreleased"]
+)
+def test_the_real_changelog_notes_are_exactly_their_own_section(version: str) -> None:
+    sections = _released_sections(_REAL_CHANGELOG)
+    names = [name for name, _ in sections]
+    expected = "\n".join(dict(sections)[version]).strip("\n") + "\n"
+    body = rn.extract_section(_REAL_CHANGELOG, version)
+    assert body == expected
+    # Nothing from any other section, heading, or the link references leaks in.
+    assert not any(line.startswith("## ") for line in body.splitlines())
+    assert not any(rn._LINK_DEF_RE.match(line) for line in body.splitlines())
+    following = names[names.index(version) + 1 :]
+    for later in following:
+        # Lines that only the later section has ("### Added" is in every one).
+        own = set(body.splitlines())
+        unique = [ln for ln in dict(sections)[later] if ln.strip() and not ln.startswith("#")]
+        assert unique, later
+        assert not own.intersection(unique) - set(dict(sections)[version]), later
+
+
+@pytest.mark.parametrize("separator", ["—", "–", "-"])
+def test_every_accepted_date_separator_yields_the_same_notes(separator: str) -> None:
+    text = (
+        f"## [2.0.0] {separator} 2026-09-01\n\nNew.\n\n## [1.0.0] {separator} 2026-08-30\n\nOld.\n"
+    )
+    assert rn.extract_section(text, "2.0.0") == "New.\n"
+    assert rn.extract_section(text, "1.0.0") == "Old.\n"
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "## [1.0.0]—2026-01-01",  # no spaces around the dash
+        "## [1.0.0] -- 2026-01-01",
+        "## [1.0.0] - ",
+        "##[1.0.0] — 2026-01-01",
+        "## [v1.0.0] — 2026-01-01",
+        "## [ 1.0.0 ] — 2026-01-01",
+    ],
+)
+def test_a_malformed_heading_is_refused_loudly_not_published_empty(heading: str) -> None:
+    with pytest.raises(rn.ReleaseError, match=r"no '## \[1.0.0\]' section"):
+        rn.extract_section(f"{heading}\n\nA.\n", "1.0.0")
+
+
+def test_a_malformed_later_heading_still_ends_the_section_before_it() -> None:
+    text = "## [2.0.0] — 2026-09-01\n\nNew.\n\n## [1.0.0]—2026-08-30\n\nOld.\n"
+    assert rn.extract_section(text, "2.0.0") == "New.\n"
+
+
+def test_crlf_line_endings_give_the_same_notes_as_lf() -> None:
+    crlf = FENCED.replace("\n", "\r\n")
+    for version in ("2.0.0", "1.0.0"):
+        body = rn.extract_section(crlf, version)
+        assert "\r" not in body
+        assert body == rn.extract_section(FENCED, version)
+
+
+def test_a_crlf_changelog_file_is_released_like_an_lf_one(tmp_path: pathlib.Path) -> None:
+    _repo(tmp_path)
+    (tmp_path / "CHANGELOG.md").write_bytes(CHANGELOG.replace("\n", "\r\n").encode("utf-8"))
+    assert rn.verify("v2.0.0", tmp_path) == "2.0.0"
+    assert rn.notes("2.0.0", tmp_path) == rn.extract_section(CHANGELOG, "2.0.0")
+
+
+@pytest.mark.parametrize("ending", ["Last line", "Last line\n", "Last line\n\n\n", "Last line\r\n"])
+def test_the_section_at_the_end_of_the_file_is_complete(ending: str) -> None:
+    text = f"## [2.0.0] — 2026-09-01\n\nNew.\n\n## [1.0.0] — 2026-08-30\n\nFirst.\n{ending}"
+    assert rn.extract_section(text, "1.0.0") == "First.\nLast line\n"
+    assert rn.extract_section(text, "2.0.0") == "New.\n"
+
+
+def test_a_section_with_only_blank_lines_before_the_links_is_empty() -> None:
+    text = "## [1.0.0] — 2026-01-01\n\n   \n\n[1.0.0]: https://example.org\n"
+    with pytest.raises(rn.ReleaseError, match="empty"):
+        rn.extract_section(text, "1.0.0")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="QA #13 defect: a reference-style link definition inside a section "
+    "silently truncates the release notes",
+)
+def test_a_link_definition_inside_a_section_does_not_truncate_it() -> None:
+    text = (
+        "## [2.0.0] — 2026-09-01\n\nSee [the spec][s].\n\n[s]: https://example.org\n\n"
+        "- More 2.0.0 content.\n\n## [1.0.0] — 2026-08-30\n\nOld.\n"
+    )
+    assert "More 2.0.0 content." in rn.extract_section(text, "2.0.0")
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="QA #13 defect: a heading indented by 1-3 spaces is a heading in "
+    "Markdown but does not end the section, so the next one leaks in",
+)
+def test_an_indented_next_heading_does_not_leak_into_the_notes() -> None:
+    text = "## [2.0.0] — 2026-09-01\n\nNew.\n\n ## [1.0.0] — 2026-08-30\n\nOld.\n"
+    assert "Old." not in rn.extract_section(text, "2.0.0")
+
+
+@pytest.mark.parametrize(
+    "tag", ["v1.4.0-rc.1", "v1.4.0+build.1", "1.4.0", "refs/tags/v1.4.0", " v1.4.0", "v1.4", ""]
+)
+def test_channels_refuses_a_tag_that_is_not_plain_semver(tag: str) -> None:
+    with pytest.raises(rn.ReleaseError, match="vMAJOR.MINOR.PATCH"):
+        rn.channels(tag, ["v1.3.0"])
+
+
+def test_channels_ignores_pre_releases_and_malformed_tags_in_the_list() -> None:
+    existing = [
+        "refs/tags/v1.5.0-rc.1",
+        "refs/tags/v2.0.0-beta",
+        "v1.4.1+build",
+        "v1.5",
+        "v01.9.0",
+        "refs/heads/v9.9.9",
+        "",
+        "   ",
+    ]
+    assert rn.channels("v1.4.0", existing) == (True, True)
+
+
+def test_channels_is_unaffected_by_duplicate_tags() -> None:
+    once = ["refs/tags/v1.3.0", "refs/tags/v1.4.0", "refs/tags/v1.4.1"]
+    assert rn.channels("v1.4.0", once * 3) == rn.channels("v1.4.0", once) == (False, False)
+    # The tag being published, listed (several times) among the existing ones.
+    assert rn.channels("v1.4.1", once + ["v1.4.1", "refs/tags/v1.4.1"]) == (True, True)
+
+
+def test_channels_tolerates_whitespace_and_crlf_around_refs() -> None:
+    assert rn.channels("v1.4.0", ["  refs/tags/v1.5.0 \r"]) == (False, True)
+    assert rn.channels("v1.4.0", ["refs/tags/v1.4.1\r"]) == (False, False)
+
+
+def test_channels_compares_numerically_not_lexically() -> None:
+    assert rn.channels("v1.10.0", ["v1.9.9", "v1.2.0"]) == (True, True)
+    assert rn.channels("v1.9.9", ["v1.10.0"]) == (False, True)
+    assert rn.channels("v1.4.9", ["v1.4.10"]) == (False, False)
+
+
+def test_the_first_release_with_no_tags_moves_everything() -> None:
+    assert rn.channels("v1.4.0", []) == (True, True)
+
+
+def test_the_channels_cli_refuses_a_pre_release() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "release_notes.py"),
+            "channels",
+            "v1.5.0-rc.1",
+        ],
+        input="refs/tags/v1.4.0\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "vMAJOR.MINOR.PATCH" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "ERROR: ghcr.io/o/r:1.4.0: NOT FOUND",
+        "Not Found",
+        "MANIFEST UNKNOWN: manifest unknown",
+        "Manifest Unknown",
+        "NAME UNKNOWN: repository name not known to registry",
+    ],
+)
+def test_not_found_is_recognised_in_any_case(output: str) -> None:
+    assert rn.image_state(False, output, first_publish=False) == "absent"
+
+
+@pytest.mark.parametrize(
+    "output", ["DENIED: requested access to the resource is denied", "Denied", "403 FORBIDDEN"]
+)
+def test_a_denial_in_any_case_is_an_error_unless_first_publish(output: str) -> None:
+    with pytest.raises(rn.ReleaseError, match="could not tell"):
+        rn.image_state(False, output, first_publish=False)
+    assert rn.image_state(False, output, first_publish=True) == "absent-first-publish"
+
+
+@pytest.mark.parametrize(
+    "output", ["401 Unauthorized", "unauthorized: authentication required", "403", "Forbidden"]
+)
+def test_other_auth_failures_are_errors_even_on_first_publish(output: str) -> None:
+    for first in (False, True):
+        with pytest.raises(rn.ReleaseError):
+            rn.image_state(False, output, first_publish=first)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="QA #13 defect: 'not found' is checked before 'denied', so a denial "
+    "whose text also says 'not found' is read as absent",
+)
+def test_a_denial_that_also_mentions_not_found_is_not_absent() -> None:
+    with pytest.raises(rn.ReleaseError):
+        rn.image_state(False, "denied: token not found for scope", first_publish=False)
+
+
+@pytest.mark.parametrize("first_publish", ["TRUE", "True", "1", "yes"])
+def test_the_image_state_cli_only_accepts_the_exact_variable_values(first_publish: str) -> None:
+    # vars.GHCR_FIRST_PUBLISH must be exactly "true"; anything else must not
+    # quietly enable the denial exception.
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "release_notes.py"),
+            "image-state",
+            "--exit-code",
+            "1",
+            "--first-publish",
+            first_publish,
+        ],
+        input=DENIED,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "absent-first-publish" not in result.stdout

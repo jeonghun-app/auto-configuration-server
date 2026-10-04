@@ -22,6 +22,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
 
+from acs.app import create_app
 from acs.config import Settings
 from acs.domain.service import ProvisioningService
 from acs.observability import JsonFormatter
@@ -639,3 +640,26 @@ def test_a_port_addressed_otp_reaches_the_smsc_through_the_service(
     short_message = smsc.received[1].body[-len(BODY) - 7 :]
     assert short_message.startswith(bytes([0x06, 0x05, 0x04, 0x91, 0x99, 0x00, 0x00]))
     assert seeded_store.get_otp(TEST_MSISDN) is not None
+
+
+@pytest.mark.parametrize("suffix", ["\n", "\r\n", "\n\n"])
+def test_a_trailing_newline_from_a_secret_file_is_stripped(suffix: str) -> None:
+    # An 8-character password saved by an editor arrives as 9 and fails every bind.
+    settings = Settings(env="test", smpp_password=SecretStr("pw-42424" + suffix))
+    assert settings.smpp_password.get_secret_value() == "pw-42424"
+
+
+@pytest.mark.parametrize(
+    ("password", "problem"),
+    [("pw-424242", "at most 8 characters"), ("pw\t4242", "printable ASCII")],
+)
+def test_an_unusable_smpp_password_refuses_to_start_without_echoing_it(
+    monkeypatch: pytest.MonkeyPatch, password: str, problem: str
+) -> None:
+    # From the environment, as ECS injects it. A pydantic error would quote the
+    # raw value, so the check is a startup problem that names only the field.
+    monkeypatch.setenv("ACS_SMPP_PASSWORD", password + "\n")
+    settings = Settings(env="test", sms_provider="smpp", smpp_host="127.0.0.1")
+    with pytest.raises(RuntimeError, match=problem) as caught:
+        create_app(settings, MemoryStore())
+    assert password not in str(caught.value)

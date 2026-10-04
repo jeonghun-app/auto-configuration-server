@@ -143,6 +143,16 @@ class Settings(BaseSettings):
     pii_hash_secret: str = ""
     rate_limit_per_ip_per_minute: int = 60
 
+    @field_validator("smpp_password")
+    @classmethod
+    def _smpp_password(cls, v: SecretStr) -> SecretStr:
+        # A secret written from a file usually ends in a newline, which can never
+        # be part of an SMPP password (a printable C-Octet String). Left in, it
+        # makes an 8-character password 9 and fails every bind.
+        # Length and characters are checked in validate_startup, not here: a
+        # pydantic error quotes the raw input, which would print the password.
+        return SecretStr(v.get_secret_value().rstrip("\r\n"))
+
     @field_validator("log_level")
     @classmethod
     def _upper(cls, v: str) -> str:
@@ -198,6 +208,11 @@ class Settings(BaseSettings):
                 "gba_enabled requires gba_nonce_secret: an unsigned nonce cannot be "
                 "verified, so the Digest response check would be bypassable."
             )
+        password = self.smpp_password.get_secret_value()
+        if len(password) > 8:
+            problems.append("smpp_password must be at most 8 characters (SMPP 3.4).")
+        if not all(" " <= ch <= "~" for ch in password):
+            problems.append("smpp_password must be printable ASCII.")
         if self.otp_length < 4 or self.otp_length > 10:
             problems.append("otp_length must be between 4 and 10.")
         return problems

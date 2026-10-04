@@ -259,8 +259,11 @@ if [[ "$SMS_PROVIDER" == "smpp" ]]; then
 SMPP: every OTP answers 503 until the operator-issued password replaces the
 random placeholder in the secret named by the SmppPasswordSecretArn output of
 ${APP_STACK}. Put it, then force a new deployment of the ECS service so the
-tasks read it:
+tasks read it. Write the file with printf, not an editor, so it has no trailing
+newline (one is stripped at startup, but an editor may add other bytes):
+  read -rs SMPP_PASSWORD    # not echoed, not in shell history
+  printf '%s' "\$SMPP_PASSWORD" > smpp-password.txt
   aws secretsmanager put-secret-value --region ${REGION} --secret-id <arn> \\
-      --secret-string file://<file holding the password>
+      --secret-string file://smpp-password.txt && rm smpp-password.txt
 SMPP
 fi

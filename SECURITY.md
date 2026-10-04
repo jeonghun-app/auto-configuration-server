@@ -3,7 +3,12 @@
 ## Reporting a vulnerability
 
 Report privately through GitHub's
-[private vulnerability reporting](https://github.com/jeonghun-app/auto-configuration-server/security/advisories/new).
+[private vulnerability reporting](https://github.com/jeonghun-app/auto-configuration-server/security/advisories/new):
+the repository's **Security** tab, then **Report a vulnerability**. The report
+opens a draft advisory visible only to you and the maintainers, and the fix,
+the advisory and any CVE request are coordinated there. The "New issue" page
+links to the same form.
+
 Do not open a public issue for anything exploitable.
 
 Please include the version or commit, reproduction steps, and the impact you

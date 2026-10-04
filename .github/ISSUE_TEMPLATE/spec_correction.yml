@@ -1,0 +1,82 @@
+name: Specification correction
+description: A parameter or node does not match a specification edition you hold.
+title: "Spec correction: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is the most useful contribution the project can receive. See
+        [CONTRIBUTING.md](https://github.com/jeonghun-app/auto-configuration-server/blob/main/CONTRIBUTING.md#the-most-useful-contribution).
+
+        **Do not paste specification text.** RCC.07, RCC.14 and the OMA
+        specifications are licensed documents. A document name, edition and clause
+        reference is enough, together with the value you believe is correct, in your
+        own words.
+  - type: input
+    id: specification
+    attributes:
+      label: Specification and edition
+      description: Document and the exact edition or version you checked against.
+      placeholder: "e.g. GSMA RCC.07 version <N.N>"
+    validations:
+      required: true
+  - type: input
+    id: clause
+    attributes:
+      label: Clause or table
+      description: Where in that edition the definition is.
+    validations:
+      required: true
+  - type: dropdown
+    id: catalogue
+    attributes:
+      label: Catalogue file
+      options:
+        - src/acs/catalog/omacp/base.yaml
+        - src/acs/catalog/omacp/profiles/UP_2.4.yaml
+        - src/acs/catalog/omacp/profiles/UP_1.0.yaml
+        - src/acs/catalog/omacp/profiles/joyn_blackbird.yaml
+        - src/acs/catalog/omadm/01-devinfo.yaml
+        - src/acs/catalog/omadm/02-devdetail.yaml
+        - src/acs/catalog/omadm/03-3gpp-ims.yaml
+        - src/acs/catalog/omadm/04-rcs-ext.yaml
+        - src/acs/catalog/conformance/omadm.yaml
+        - src/acs/catalog/conformance/rcc14.yaml
+        - src/acs/catalog/specscope/korea.yaml
+        - Other or not sure
+    validations:
+      required: true
+  - type: input
+    id: entry
+    attributes:
+      label: Entry
+      description: The characteristic path and parameter, the management node, or the requirement id.
+      placeholder: "e.g. APPLICATION:ap2002/MESSAGING/CHAT  MaxSize"
+    validations:
+      required: true
+  - type: textarea
+    id: current
+    attributes:
+      label: What the catalogue says now
+      description: Name, type, default or level as currently declared.
+    validations:
+      required: true
+  - type: textarea
+    id: correct
+    attributes:
+      label: What it should be
+      description: The corrected name, type, default or level, in your own words.
+    validations:
+      required: true
+  - type: checkboxes
+    id: attestation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I checked this against the edition named above, not against another implementation.
+          required: true
+        - label: >-
+            I have not pasted text from a licensed specification into this issue,
+            only a reference to it.
+          required: true

@@ -410,6 +410,46 @@ def test_the_first_quota_item_is_seeded_from_legacy_send_rows(
     assert refused == OtpIssueRefused("daily_quota", 3600)
 
 
+@pytest.mark.aws
+def test_legacy_sends_after_the_quota_was_created_still_count_towards_the_daily_cap(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
+    legacy_time = NOW + 61
+    dynamo_store._table.put_item(
+        Item={
+            "pk": f"OTPSEND#{TEST_MSISDN}",
+            "sk": str(legacy_time).zfill(12),
+            "entity": "otp_send",
+            "expires_at": legacy_time + 86400,
+        }
+    )
+    later = legacy_time + 61
+    refused = dynamo_store.issue_otp(challenge(later, otp_hash="h3"), 60, 2, later)
+    assert refused == OtpIssueRefused("daily_quota", 3600)
+    stored = dynamo_store.get_otp(TEST_MSISDN)
+    assert stored is not None and stored.otp_hash == "h1"
+
+
+@pytest.mark.aws
+def test_dual_written_sends_are_not_counted_twice(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
+    later = NOW + 61
+    assert dynamo_store.issue_otp(challenge(later, otp_hash="h2"), 60, 2, later) is None
+    refused = dynamo_store.issue_otp(challenge(later + 61), 60, 2, later + 61)
+    assert refused == OtpIssueRefused("daily_quota", 3600)
+
+
+def test_distinct_sends_in_the_same_second_each_spend_the_daily_quota(otp_store: Store) -> None:
+    assert otp_store.issue_otp(challenge(), 0, 2, NOW) is None
+    assert otp_store.issue_otp(challenge(otp_hash="h2"), 0, 2, NOW) is None
+    assert otp_store.issue_otp(challenge(otp_hash="h3"), 0, 2, NOW) == OtpIssueRefused(
+        "daily_quota", 3600
+    )
+
+
 # ------------------------------------------------------- failure cleanup
 class LateFailingSender:
     """Fails only after the challenge it was sent for was exhausted and replaced."""

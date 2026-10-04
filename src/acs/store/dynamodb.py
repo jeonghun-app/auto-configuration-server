@@ -6,7 +6,7 @@ Table design (partition key ``pk``, sort key ``sk``)::
     MSISDN#<msisdn>  SUB           reverse index -> imsi
     OTP#<msisdn>     CHAL          pending OTP challenge          (TTL)
     OTPQUOTA#<msisdn> SENDS        send times for the daily cap   (TTL)
-    OTPSEND#<msisdn> <epoch>       legacy send rows: seed OTPQUOTA#, dual-written for 1.3
+    OTPSEND#<msisdn> <epoch>       legacy send rows: merged with OTPQUOTA#, dual-written for 1.3
     TOKEN#<sha256>   META          provisioning token            (TTL)
     DEV#<device_id>  META          managed device
     DMSESS#<sid>     META          OMA-DM session state           (TTL)
@@ -221,8 +221,12 @@ class DynamoDbStore:
                 age = now - existing.created_at
                 if age < cooldown_seconds:
                     return OtpIssueRefused("cooldown", cooldown_seconds - age)
-            history = quota["sends"] if quota else self._legacy_sends(msisdn, now)
+            history = quota["sends"] if quota else []
             sends = [int(t) for t in history if int(t) >= now - 86400]
+            # Until #28, 1.3 can write more legacy rows after the quota was seeded.
+            # Exclude dual-written seconds, but preserve distinct sends already
+            # counted in the quota within one second when cooldown is disabled.
+            sends.extend(sorted(set(self._legacy_sends(msisdn, now)) - set(sends)))
             if len(sends) >= max_sends_per_day:
                 return OtpIssueRefused("daily_quota", 3600)
 
@@ -279,11 +283,10 @@ class DynamoDbStore:
         raise OtpStoreContention("concurrent OTP issue for one MSISDN kept conflicting")
 
     def _legacy_sends(self, msisdn: str, now: int) -> list[int]:
-        """Send times from the OTPSEND# rows written before the quota item existed.
+        """Send times from the legacy OTPSEND# rows in the last 24 hours.
 
-        Read once, when the quota item is first created, so the deployment that
-        introduced it does not reset every daily count to zero. The rows expire by
-        TTL within 24 hours, after which this finds nothing.
+        Read on every quota check until #28 removes mixed-version support: 1.3
+        tasks can still send after the quota item exists.
         """
         from boto3.dynamodb.conditions import Key
 

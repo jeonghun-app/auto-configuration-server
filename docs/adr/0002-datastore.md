@@ -27,7 +27,7 @@ development and unit tests, and is refused in staging and production at startup.
 SUB#<imsi>       META      subscriber record          gsi1pk=ENTITY#subscriber
 MSISDN#<msisdn>  SUB       reverse index -> imsi
 OTP#<msisdn>     CHAL      pending challenge          TTL
-OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (superseded; seeds OTPQUOTA#, dual-written until #28)
+OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (merged with OTPQUOTA#, dual-written until #28)
 TOKEN#<sha256>   META      token                      gsi1pk=TOKENIMSI#<imsi>, TTL
 DEV#<device_id>  META      managed device             gsi1pk=ENTITY#device
 DMSESS#<sid>     META      DM session state           TTL
@@ -70,8 +70,8 @@ validation refuses it outside development.
   not delete subscriber data.
 - There is no cross-item transaction. Nothing in the current flows needs one; OTP
   consumption is a single-item update.
-  *(Superseded by the amendment below: OTP issue now uses one two-item
-  transaction.)*
+  *(Superseded by the amendment below: OTP issue now uses one transaction,
+  including a legacy send row until #28.)*
 
 ## Amendment: atomic OTP issue and consumption
 
@@ -134,20 +134,24 @@ verification that loses five rounds is not verified.
   `TransactWriteItems` needs no IAM action of its own; it is authorised by the
   per-item `PutItem` already granted on the table.
 - Every cap, cooldown and attempt limit holds across tasks, not just within one.
-- **Daily cap across the deployment.** When an MSISDN's `OTPQUOTA#` item does
-  not exist yet, `issue_otp` seeds it from that MSISDN's `OTPSEND#` rows of the
-  last 24 hours, read with the old `Query` on the row timestamps, so the daily
-  count carries over the deployment instead of restarting at zero. The old rows
-  are never written again and expire by TTL within a day, after which the seed
-  finds nothing. The resend cooldown is unaffected because it is read from the
-  challenge.
+- **Daily cap across the deployment.** `issue_otp` merges the quota's send
+  history with that MSISDN's `OTPSEND#` rows of the last 24 hours, read with a
+  consistent `Query` on the row timestamps. This seeds a missing quota item and
+  includes legacy sends made after it was created, so the daily count carries
+  over the deployment instead of restarting at zero. The resend cooldown is
+  unaffected because it is read from the challenge.
 - **Mixed versions.** The atomic limit holds once every task runs 1.4.0; during a
   rolling deployment the 1.3 tasks' non-atomic check still applies, and
   dual-writing lets them see the new tasks' sends. While 1.4.x is current,
   `issue_otp` also writes the legacy `OTPSEND#<msisdn>` row (1.3's key,
   attributes and TTL) as a third `Put` in the same transaction, so 1.3's `Query`
-  counts sends made by 1.4 tasks. No new IAM action is needed. Removing the dual
-  write once no 1.3 task can run is tracked in #28.
+  counts sends made by 1.4 tasks. Conversely, every 1.4 quota check queries the
+  legacy rows even when the quota item exists. A legacy timestamp already in
+  the quota is not counted again; distinct sends recorded in the quota within
+  the same second still each count. A 1.3 write racing after the query is not
+  protected by the quota version condition, so the mixed deployment still
+  cannot guarantee the atomic cap. No new IAM action is needed. Removing the
+  legacy reads and dual writes once no 1.3 task can run is tracked in #28.
 - The quota item keeps a list of send times, not a counter, so the 24-hour window
   stays rolling. The list is bounded by the cap.
 - moto applies requests without locking, so the concurrency tests serialise

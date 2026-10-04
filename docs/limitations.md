@@ -20,6 +20,10 @@ operator SMSC can, and since 1.4.0 this repository can talk to one over SMPP 3.4
 - Every failure — bind refused, an error status, `generic_nack`, a timeout, a
   connection or TLS failure — answers `503` with `Retry-After: 60`, the metric
   `OtpDeliveryFailed`, and the pending challenge deleted.
+- Once the SMSC accepts `submit_sm`, the send counts as successful even if the
+  closing `unbind` fails: the message is already with the SMSC, and failing would
+  delete the challenge whose code is on its way. The failed `unbind` is logged as
+  a warning.
 - `SnsSmsSender` and `EndUserMessagingSender` still raise `UnsupportedDelivery`
   for `SMS_port`: `503` with `Retry-After`, challenge deleted, rather than a text
   message the client will never read.

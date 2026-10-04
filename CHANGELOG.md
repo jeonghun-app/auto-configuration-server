@@ -26,8 +26,10 @@ now published from a tag, with a container image on GHCR.
   inline and string-table strings, and `OPAQUE` only when it holds UTF-8 text.
   Attributes, literal tags, extensions, `ENTITY`, processing instructions, other
   code pages and binary `OPAQUE` are refused with `400` rather than guessed at.
-  Every length, depth and element count is a named constant, and a violation is a
-  `4xx`, never a `500`. See [docs/oma-dm.md](docs/oma-dm.md#wbxml-encoding).
+  Every length, depth and element count is a named constant. A request that
+  breaks a decoding limit is a `4xx`, never a `500`; a server response that
+  breaks the encoder's own, larger limits is a `500` with `DmEncodingError`, and
+  the session and device state are left as they were. See [docs/oma-dm.md](docs/oma-dm.md#wbxml-encoding).
 - The WBXML response is compact: XML indentation is not carried into it as inline
   strings, which made up 63% of an init response and sit where the DTD allows only
   elements. Leaf values keep their whitespace.
@@ -38,7 +40,10 @@ now published from a tag, with a container image on GHCR.
   connection surviving across tasks. With `SMS_port` the message is 8-bit data
   with UDHI set and the 16-bit application port header ahead of the OTP template;
   a text OTP uses the GSM default alphabet only when that is byte-for-byte safe,
-  otherwise UCS-2. A message longer than one SMS is refused, not concatenated. It
+  otherwise UCS-2. A message longer than one SMS is refused, not concatenated.
+  Once `submit_sm` is accepted the send counts as successful even if the closing
+  `unbind` fails, because the SMSC already holds the message; the failure is
+  logged as a warning. It
   has been exercised **only against an in-process fake SMSC**, never an operator
   SMSC or a handset, so `RCC14-AUTH-OTP-PORT` is `partial`, not implemented. The
   AWS providers still refuse `SMS_port` rather than downgrade it.
@@ -64,7 +69,10 @@ now published from a tag, with a container image on GHCR.
   then publishes `ghcr.io/jeonghun-app/auto-configuration-server` for
   `linux/amd64` and `linux/arm64` with an SBOM and provenance, and creates the
   GitHub Release from this file. `X.Y.Z` is never overwritten; `X.Y` and `latest`
-  only move forward. `scripts/release_notes.py` runs the same checks locally.
+  only move forward. Locally, `scripts/release_notes.py verify` runs the tag
+  checks only: the `vX.Y.Z` form, both version declarations and a non-empty
+  CHANGELOG section. Being on `main` and `make check` are separate steps of the
+  workflow.
   Procedure and rollback: [docs/releasing.md](docs/releasing.md).
 - A code of conduct ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), Contributor
   Covenant 2.1), and issue forms in place of blank issues. The bug form warns
@@ -77,8 +85,8 @@ now published from a tag, with a container image on GHCR.
 
 - **The admin JSON API requires a JSON `Content-Type`.** FastAPI 0.132 and later
   check it: `PUT /admin/subscribers/{imsi}` with a JSON body and no
-  `Content-Type`, or `text/plain`, now answers `422` and stores nothing, where
-  1.3.0 answered `200`. Kept on purpose — the API parses a body as JSON only when
+  `Content-Type` now answers `422` and stores nothing, where 1.3.0 answered
+  `200`. A body sent as `text/plain` was already refused with `422` in 1.3.0. Kept on purpose — the API parses a body as JSON only when
   the client says it is JSON — and pinned by a test.
 - **`;` no longer separates URL-encoded form fields.** python-multipart 0.0.30 and
   later split only on `&`, which closes a smuggling and a quadratic-parsing
@@ -134,6 +142,12 @@ now published from a tag, with a container image on GHCR.
   sent; a verification that loses five rounds is not verified. DynamoDB throttling,
   capacity and validation errors are now raised, where every cancelled transaction
   used to be retried as contention and could end as `200` pending with no SMS sent.
+- **AWS SMS provider failures answered `500` and left the challenge.** An error
+  from AWS End User Messaging or SNS was not handled, so the client got a `500`
+  and the challenge stayed, holding the resend cooldown for a code that was never
+  sent. It now takes the same path as an SMSC failure: `503`,
+  `detail=otp_delivery_failed`, `Retry-After: 60`, `OtpDeliveryFailed`, and the
+  challenge deleted (#35).
 - A failed SMS send deleted whichever challenge the MSISDN held by then. The send
   can take seconds, so a late failure could delete a newer challenge whose code
   was already on its way. Only the challenge issued for that send is deleted now.
@@ -220,9 +234,11 @@ client in the repository already follows it; see
   existing ones, so a later deploy without the `--smpp-*` flags resets them to
   their defaults. Repeat them on every deploy and rollback of an SMPP stack.
 - **The OTP limits are atomic only once every task runs 1.4.0.** During a rolling
-  deployment the 1.3 tasks keep their non-atomic check; the dual-written
-  `OTPSEND#` rows let them see the 1.4 tasks' sends, but concurrent requests that
-  land on 1.3 tasks can still exceed the cap until the rollout completes. Rolling
+  deployment the risk is the 1.3 tasks' own non-atomic check: concurrent requests
+  that 1.3 tasks serve can still exceed the cap. The dual-written `OTPSEND#` rows
+  let 1.3 tasks see the 1.4 tasks' sends, and 1.4 always counts the `OTPSEND#`
+  rows of the last 24 hours together with its quota item, so once the rollout
+  completes, sends that 1.3 tasks made during it are counted too (#35). Rolling
   back to 1.3.0 keeps the daily counts for the same reason; 1.3 ignores the new
   `challenge_id` and `OTPQUOTA#` item.
 - **The container image is now on GHCR**:

@@ -178,12 +178,18 @@ and every OTP answers `503` until the real value is in place:
 ```bash
 SMPP_SECRET=$(aws cloudformation describe-stacks --region $REGION --stack-name $STACK \
   --query "Stacks[0].Outputs[?OutputKey=='SmppPasswordSecretArn'].OutputValue" --output text)
-# Not echoed and not in shell history; printf writes no trailing newline.
-read -rs SMPP_PASSWORD
-printf '%s' "$SMPP_PASSWORD" > smpp-password.txt
-aws secretsmanager put-secret-value --region $REGION --secret-id "$SMPP_SECRET" \
-  --secret-string file://smpp-password.txt && rm smpp-password.txt
-unset SMPP_PASSWORD
+# In a subshell, so the umask and the trap end with it. The password is not
+# echoed and not in shell history; printf writes no trailing newline; the file
+# is readable only by you and removed on every exit path, failures included.
+(
+  umask 077
+  f=$(mktemp)
+  trap 'rm -f "$f"' EXIT
+  read -rs SMPP_PASSWORD
+  printf '%s' "$SMPP_PASSWORD" > "$f"
+  aws secretsmanager put-secret-value --region "$REGION" --secret-id "$SMPP_SECRET" \
+    --secret-string "file://$f"
+)
 aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
   --service rcs-acs-app-service --force-new-deployment
 ```

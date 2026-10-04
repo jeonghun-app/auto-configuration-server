@@ -84,7 +84,14 @@ Behaviour = Callable[["FakeSmsc", socket.socket, Pdu], bool]
 
 @dataclasses.dataclass
 class FakeSmsc:
-    """A single-connection SMPP peer driven by per-command behaviours."""
+    """A single-connection SMPP peer driven by per-command behaviours.
+
+    ``received`` is written by the server thread. A PDU the client sent and then
+    waited for an answer to is recorded before the answer goes out, so it is
+    there when send() returns. One the client sent without waiting - a
+    generic_nack, an unbind_resp - may still be in flight: wait for it with
+    :meth:`wait_for_received` rather than reading ``received`` directly.
+    """
 
     behaviours: dict[int, Behaviour] = dataclasses.field(default_factory=dict)
     received: list[Pdu] = dataclasses.field(default_factory=list)
@@ -93,6 +100,7 @@ class FakeSmsc:
 
     def __post_init__(self) -> None:
         self.stop = threading.Event()
+        self._recorded = threading.Condition()
         self._listener = socket.create_server(("127.0.0.1", 0))
         self._listener.settimeout(5)
         self.port = self._listener.getsockname()[1]
@@ -110,13 +118,25 @@ class FakeSmsc:
             try:
                 while True:
                     pdu, raw = read_pdu(conn)
-                    self.received.append(pdu)
-                    self.raw.append(raw)
+                    self.record(pdu, raw)
                     handler = self.behaviours.get(pdu.command_id, default_behaviour)
                     if not handler(self, conn, pdu):
                         return
             except (ConnectionError, OSError):
                 return
+
+    def record(self, pdu: Pdu, raw: bytes = b"") -> None:
+        with self._recorded:
+            self.received.append(pdu)
+            self.raw.append(raw)
+            self._recorded.notify_all()
+
+    def wait_for_received(self, count: int, timeout: float = 5) -> list[Pdu]:
+        """Block until the server thread has recorded ``count`` PDUs."""
+        with self._recorded:
+            arrived = self._recorded.wait_for(lambda: len(self.received) >= count, timeout)
+            assert arrived, f"fake SMSC recorded {len(self.received)} of {count} PDUs"
+            return list(self.received)
 
     def ids(self) -> list[int]:
         return [pdu.command_id for pdu in self.received]
@@ -158,8 +178,7 @@ def smsc_request_first(request: Pdu, then: Behaviour) -> Behaviour:
     def handler(smsc: FakeSmsc, conn: socket.socket, pdu: Pdu) -> bool:
         conn.sendall(request.encode())
         answer, raw = read_pdu(conn)
-        smsc.received.append(answer)
-        smsc.raw.append(raw)
+        smsc.record(answer, raw)
         return then(smsc, conn, pdu)
 
     return handler
@@ -373,13 +392,14 @@ def test_an_invalid_command_length_is_refused_with_a_generic_nack(smsc: FakeSmsc
     def garbage(smsc: FakeSmsc, conn: socket.socket, _pdu: Pdu) -> bool:
         conn.sendall(struct.pack(">IIII", 8, BIND_TRANSCEIVER_RESP, 0, 1))
         answer, _ = read_pdu(conn)
-        smsc.received.append(answer)
+        smsc.record(answer)
         return False
 
     smsc.behaviours[BIND_TRANSCEIVER] = garbage
     with pytest.raises(SmppError, match="invalid command_length$"):
         sender_for(smsc).send(port_request())
-    assert smsc.received[-1].command_id == GENERIC_NACK
+    # The client raises right after writing the nack; the bind and the nack.
+    assert smsc.wait_for_received(2)[-1].command_id == GENERIC_NACK
 
 
 def test_a_closed_connection_is_a_delivery_failure(smsc: FakeSmsc) -> None:
@@ -392,7 +412,8 @@ def test_an_unbind_from_the_smsc_is_answered_and_fails_the_send(smsc: FakeSmsc) 
     smsc.behaviours[SUBMIT_SM] = smsc_request_first(Pdu(UNBIND, 0, 900), silent)
     with pytest.raises(SmppError, match="unbound the session"):
         sender_for(smsc).send(port_request())
-    assert smsc.received[-1] == Pdu(UNBIND_RESP, 0, 900)
+    # bind, submit_sm, then the unbind_resp the client wrote before raising.
+    assert smsc.wait_for_received(3)[-1] == Pdu(UNBIND_RESP, 0, 900)
 
 
 def test_an_unreachable_smsc_is_a_delivery_failure() -> None:

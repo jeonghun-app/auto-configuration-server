@@ -94,6 +94,7 @@ def create_challenge(
         created_at=current,
         expires_at=current + policy.ttl_seconds,
         sms_port=sms_port,
+        challenge_id=secrets.token_hex(8),
     )
     refused = store.issue_otp(
         challenge,
@@ -160,16 +161,16 @@ def verify_challenge(
 def discard_challenge(store: Store, challenge: OtpChallenge) -> bool:
     """Delete ``challenge`` if it is still the stored one, whatever its attempts.
 
+    Identity is the challenge id, so a newer challenge that happens to carry the
+    same code from the same second is not mistaken for it.
+
     For a challenge whose SMS could not be sent. The send can take seconds, and
     meanwhile the challenge may have been exhausted and a new one issued; deleting
     by MSISDN alone would destroy the new challenge, whose code is on its way.
     """
     for _ in range(_VERIFY_ROUNDS):
         current = store.get_otp(challenge.msisdn)
-        if current is None or (current.otp_hash, current.created_at) != (
-            challenge.otp_hash,
-            challenge.created_at,
-        ):
+        if current is None or not current.same_issue(challenge):
             return False
         # Attempts may still move under us; the next round re-reads them.
         if store.replace_otp(current, None):

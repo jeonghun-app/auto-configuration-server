@@ -14,6 +14,15 @@ from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subsc
 from acs.store.base import OtpIssueRefused
 
 
+def _unchanged(current: OtpChallenge, expected: OtpChallenge) -> bool:
+    """The same condition DynamoDbStore puts on its conditional writes."""
+    if current.attempts != expected.attempts:
+        return False
+    if expected.challenge_id:
+        return current.challenge_id == expected.challenge_id
+    return (current.otp_hash, current.created_at) == (expected.otp_hash, expected.created_at)
+
+
 class MemoryStore:
     """Thread-safe dictionary-backed :class:`acs.store.base.Store`."""
 
@@ -87,11 +96,7 @@ class MemoryStore:
     def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
         with self._lock:
             current = self._otp.get(expected.msisdn)
-            if current is None or (current.otp_hash, current.created_at, current.attempts) != (
-                expected.otp_hash,
-                expected.created_at,
-                expected.attempts,
-            ):
+            if current is None or not _unchanged(current, expected):
                 return False
             if replacement is None:
                 del self._otp[expected.msisdn]

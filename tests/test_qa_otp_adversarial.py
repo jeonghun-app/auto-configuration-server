@@ -21,10 +21,6 @@ from acs.store.dynamodb import DynamoDbStore
 __all__ = ["dynamo_store", "otp_store"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA defect: repeated code within one second aliases a new challenge during discard",
-)
 def test_a_late_failed_send_preserves_a_new_issue_even_if_the_random_code_repeats(
     otp_store: Store, monkeypatch: pytest.MonkeyPatch
 ) -> None:

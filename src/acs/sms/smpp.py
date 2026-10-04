@@ -30,6 +30,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import hmac
+import math
 import secrets
 import socket
 import ssl
@@ -68,6 +69,44 @@ ESME_RINVCMDID: Final = 0x00000003
 # Temporary application error: the SMSC keeps the deliver_sm and retries it on a
 # later bind, instead of treating a message this sender never reads as delivered.
 ESME_RX_T_APPN: Final = 0x00000064
+
+# Names for the SMPP 3.4 command_status values an SMSC most often returns. The
+# SMSC chooses this number freely, and it knows the OTP it is carrying, so only a
+# value from this fixed table is ever written into an error or a log; anything
+# else is reported by its class alone. Unlisted codes are visible on the SMSC.
+_STATUS_NAMES: Final[dict[int, str]] = {
+    0x00000000: "ESME_ROK",
+    0x00000001: "ESME_RINVMSGLEN",
+    0x00000002: "ESME_RINVCMDLEN",
+    0x00000003: "ESME_RINVCMDID",
+    0x00000004: "ESME_RINVBNDSTS",
+    0x00000005: "ESME_RALYBND",
+    0x00000008: "ESME_RSYSERR",
+    0x0000000A: "ESME_RINVSRCADR",
+    0x0000000B: "ESME_RINVDSTADR",
+    0x0000000D: "ESME_RBINDFAIL",
+    0x0000000E: "ESME_RINVPASWD",
+    0x0000000F: "ESME_RINVSYSID",
+    0x00000014: "ESME_RMSGQFUL",
+    0x00000045: "ESME_RSUBMITFAIL",
+    0x00000058: "ESME_RTHROTTLED",
+    0x00000064: "ESME_RX_T_APPN",
+    0x00000065: "ESME_RX_P_APPN",
+    0x00000066: "ESME_RX_R_APPN",
+    0x000000FE: "ESME_RDELIVERYFAILURE",
+    0x000000FF: "ESME_RUNKNOWNERR",
+}
+
+
+def describe_status(status: int) -> str:
+    """A log-safe description of an SMSC command_status."""
+    name = _STATUS_NAMES.get(status)
+    if name is not None:
+        return f"{name} (0x{status:08X})"
+    if 0x00000400 <= status <= 0x000004FF:
+        return "an SMSC vendor-specific status"
+    return "an unlisted status"
+
 
 INTERFACE_VERSION: Final = 0x34
 
@@ -196,15 +235,15 @@ class _Session:
         while True:
             pdu = self._read(deadline)
             if pdu.command_id == GENERIC_NACK:
-                raise SmppError(f"SMSC answered generic_nack, status 0x{pdu.command_status:08X}")
+                raise SmppError(
+                    f"SMSC answered generic_nack, status {describe_status(pdu.command_status)}"
+                )
             if not pdu.command_id & _RESPONSE_BIT:
                 self._answer(pdu)
                 continue
             if pdu.command_id != expected or pdu.sequence_number != sequence:
-                raise SmppError(
-                    f"unexpected SMPP response 0x{pdu.command_id:08X} "
-                    f"for sequence {pdu.sequence_number}"
-                )
+                # Neither number is echoed: both are the SMSC's to choose.
+                raise SmppError("unexpected SMPP response: command or sequence mismatch")
             return pdu
 
     def _answer(self, pdu: Pdu) -> None:
@@ -225,7 +264,7 @@ class _Session:
         length, command_id, status, sequence = _HEADER.unpack(header)
         if length < _HEADER.size or length > _MAX_PDU:
             self.write(Pdu(GENERIC_NACK, ESME_RINVCMDLEN, sequence))
-            raise SmppError(f"SMSC sent an invalid command_length {length}")
+            raise SmppError("SMSC sent an invalid command_length")
         body = self._read_exact(length - _HEADER.size, deadline)
         return Pdu(command_id, status, sequence, body)
 
@@ -352,17 +391,25 @@ class SmppSmsSender:
     def send(self, request: SmsRequest) -> SmsResult:
         if not self._host:
             raise SmppError("SMPP host is not configured")
+        # Settings refuse such a value, but a sender built another way must still
+        # fail into the 503-and-discard path rather than a 500 that strands the OTP.
+        if not (math.isfinite(self._timeout) and self._timeout > 0):
+            raise SmppError("SMPP timeout is not a positive finite number")
         body = self.submit_sm_body(request)
         try:
             with self._connect() as sock:
                 session = _Session(sock, self._timeout)
                 bind = session.request(BIND_TRANSCEIVER, self._bind_body)
                 if bind.command_status != ESME_ROK:
-                    raise SmppError(f"SMSC refused the bind, status 0x{bind.command_status:08X}")
+                    raise SmppError(
+                        f"SMSC refused the bind, status {describe_status(bind.command_status)}"
+                    )
                 submit = session.request(SUBMIT_SM, body)
                 self._unbind(session)
                 if submit.command_status != ESME_ROK:
-                    raise SmppError(f"SMSC refused submit_sm, status 0x{submit.command_status:08X}")
+                    raise SmppError(
+                        f"SMSC refused submit_sm, status {describe_status(submit.command_status)}"
+                    )
                 reference = self._message_reference(submit.body)
         except SmppError as exc:
             log.error("smpp send failed", extra={"error": str(exc), "smsc": self._host})
@@ -374,6 +421,11 @@ class SmppSmsSender:
             # The OS message names the peer at most, never the PDU contents.
             log.error("smpp connection failed", extra={"error": str(exc), "smsc": self._host})
             raise SmppError(f"SMSC connection failed: {exc.__class__.__name__}") from None
+        except (ValueError, OverflowError) as exc:
+            # socket and ssl raise these for arguments they refuse, such as a host
+            # name that cannot be encoded; the message may quote the argument.
+            log.error("smpp send failed", extra={"error": exc.__class__.__name__})
+            raise SmppError(f"SMPP transport refused: {exc.__class__.__name__}") from None
 
         log.info(
             "smpp submit accepted",
@@ -402,7 +454,9 @@ class SmppSmsSender:
             log.warning(
                 "smpp message_id is malformed",
                 extra={
-                    "message_id_length": len(raw),
+                    # Capped so the SMSC cannot spell a number with the length.
+                    "message_id_length": min(len(raw), _MAX_MESSAGE_ID),
+                    "over_limit": len(raw) + 1 > _MAX_MESSAGE_ID,
                     "terminated": end >= 0,
                     "printable": printable,
                     "smsc": self._host,
@@ -427,7 +481,7 @@ class SmppSmsSender:
         # it, least of all turn an accepted message into a 503.
         try:
             session.request(UNBIND, b"")
-        except (SmppError, OSError):
+        except (SmppError, OSError, ValueError, OverflowError):
             log.warning("smpp unbind did not complete", extra={"smsc": self._host})
 
     def _audit(self, request: SmsRequest, reference: str) -> None:

@@ -41,7 +41,6 @@ _ENTITY_DEVICE = "device"
 # challenge in between. A loser re-reads and then normally meets the cooldown, so
 # a handful of rounds is plenty; past that the send is refused, never let through.
 _OTP_WRITE_ROUNDS = 5
-_SAME_CHALLENGE = "otp_hash = :h AND created_at = :c AND attempts = :a"
 
 
 def _clean(value: Any) -> Any:
@@ -68,11 +67,27 @@ def _encode(item: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _same_challenge_values(challenge: OtpChallenge) -> dict[str, Any]:
+def _same_challenge(challenge: OtpChallenge) -> dict[str, Any]:
+    """Condition that the stored challenge is ``challenge``, unchanged since read.
+
+    By id when it has one. A challenge stored by 1.3 has none, so it falls back to
+    code, creation time and attempts, the condition 1.4.0 used.
+    """
+    if challenge.challenge_id:
+        return {
+            "ConditionExpression": "challenge_id = :id AND attempts = :a",
+            "ExpressionAttributeValues": {
+                ":id": challenge.challenge_id,
+                ":a": challenge.attempts,
+            },
+        }
     return {
-        ":h": challenge.otp_hash,
-        ":c": challenge.created_at,
-        ":a": challenge.attempts,
+        "ConditionExpression": "otp_hash = :h AND created_at = :c AND attempts = :a",
+        "ExpressionAttributeValues": {
+            ":h": challenge.otp_hash,
+            ":c": challenge.created_at,
+            ":a": challenge.attempts,
+        },
     }
 
 
@@ -234,8 +249,7 @@ class DynamoDbStore:
             if existing is None:
                 challenge_put["ConditionExpression"] = "attribute_not_exists(pk)"
             else:
-                challenge_put["ConditionExpression"] = _SAME_CHALLENGE
-                challenge_put["ExpressionAttributeValues"] = _same_challenge_values(existing)
+                challenge_put.update(_same_challenge(existing))
             # Mixed-version compatibility, to be removed by #28 ("Stop dual-writing
             # legacy OTPSEND rows") once no 1.3 task can be running: 1.3 counts
             # the daily cap by querying these rows, so during a rolling deployment
@@ -282,10 +296,7 @@ class DynamoDbStore:
 
     def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
         key = {"pk": f"OTP#{expected.msisdn}", "sk": "CHAL"}
-        condition = {
-            "ConditionExpression": _SAME_CHALLENGE,
-            "ExpressionAttributeValues": _same_challenge_values(expected),
-        }
+        condition = _same_challenge(expected)
         try:
             if replacement is None:
                 self._table.delete_item(Key=key, **condition)

@@ -290,10 +290,6 @@ def test_a_waiting_smsc_does_not_block_health_requests(
         assert slow.result(timeout=3).status_code == 200
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA defect: untrusted numeric SMPP header fields expose an echoed OTP in errors/logs",
-)
 @pytest.mark.parametrize("field", ["sequence_number", "command_length", "command_status"])
 def test_an_smsc_cannot_echo_the_otp_into_error_logs_via_numeric_header_fields(
     peer: FakeSmsc, caplog: pytest.LogCaptureFixture, field: str
@@ -388,9 +384,6 @@ def test_every_missing_credential_combination_refuses_production_startup(
         create_app(settings, MemoryStore())
 
 
-@pytest.mark.xfail(
-    strict=True, reason="QA defect: invalid SMPP port/timeout values are accepted at startup"
-)
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -422,9 +415,6 @@ def test_invalid_transport_settings_fail_before_the_first_otp(field: str, value:
     assert refused, f"{field}={value} accepted at startup"
 
 
-@pytest.mark.xfail(
-    strict=True, reason="QA defect: nonfinite/negative timeout raises HTTP 500 and strands OTP"
-)
 @pytest.mark.parametrize("timeout", [-1.0, float("nan"), float("inf")])
 def test_an_invalid_timeout_cannot_leave_a_never_sent_otp_pending(
     settings: Settings, seeded_store: MemoryStore, timeout: float

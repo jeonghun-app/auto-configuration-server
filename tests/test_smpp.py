@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Iterator
 
 import pytest
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
 
 from acs.config import Settings
@@ -45,6 +45,7 @@ from acs.sms.smpp import (
     Pdu,
     SmppError,
     SmppSmsSender,
+    describe_status,
     encode_short_message,
 )
 from acs.store.memory import MemoryStore
@@ -318,7 +319,7 @@ def test_a_refused_bind_is_a_delivery_failure_and_nothing_is_submitted(
     smsc: FakeSmsc,
 ) -> None:
     smsc.behaviours[BIND_TRANSCEIVER] = respond(ESME_RBINDFAIL, b"\x00")
-    with pytest.raises(SmppError, match=r"refused the bind, status 0x0000000D"):
+    with pytest.raises(SmppError, match=r"refused the bind, status ESME_RBINDFAIL \(0x0000000D\)"):
         sender_for(smsc).send(port_request())
     assert SUBMIT_SM not in smsc.ids()
 
@@ -327,7 +328,9 @@ def test_a_submit_sm_error_status_is_a_delivery_failure_after_unbinding(
     smsc: FakeSmsc,
 ) -> None:
     smsc.behaviours[SUBMIT_SM] = respond(ESME_RTHROTTLED, b"\x00")
-    with pytest.raises(SmppError, match=r"refused submit_sm, status 0x00000058"):
+    with pytest.raises(
+        SmppError, match=r"refused submit_sm, status ESME_RTHROTTLED \(0x00000058\)"
+    ):
         sender_for(smsc).send(port_request())
     assert smsc.ids()[-1] == UNBIND
 
@@ -351,7 +354,7 @@ def test_a_generic_nack_is_a_delivery_failure(smsc: FakeSmsc) -> None:
         return True
 
     smsc.behaviours[SUBMIT_SM] = nack
-    with pytest.raises(SmppError, match="generic_nack, status 0x00000003"):
+    with pytest.raises(SmppError, match=r"generic_nack, status ESME_RINVCMDID \(0x00000003\)"):
         sender_for(smsc).send(port_request())
 
 
@@ -373,7 +376,7 @@ def test_an_invalid_command_length_is_refused_with_a_generic_nack(smsc: FakeSmsc
         return False
 
     smsc.behaviours[BIND_TRANSCEIVER] = garbage
-    with pytest.raises(SmppError, match="invalid command_length 8"):
+    with pytest.raises(SmppError, match="invalid command_length$"):
         sender_for(smsc).send(port_request())
     assert smsc.received[-1].command_id == GENERIC_NACK
 
@@ -414,6 +417,53 @@ def test_every_smpp_failure_honours_the_undeliverable_contract() -> None:
     # The service turns UnsupportedDelivery into 503 + Retry-After and deletes the
     # challenge; an SMSC failure must take the same path.
     assert issubclass(SmppError, UnsupportedDelivery)
+
+
+@pytest.mark.parametrize(
+    ("status", "described"),
+    [
+        (0x0000000E, "ESME_RINVPASWD (0x0000000E)"),
+        (0x00000400, "an SMSC vendor-specific status"),
+        (0x00735190, "an unlisted status"),
+    ],
+)
+def test_a_status_is_named_from_the_table_or_reported_by_class_only(
+    status: int, described: str
+) -> None:
+    # An unlisted value is the SMSC's free choice and may spell the OTP.
+    assert describe_status(status) == described
+
+
+@pytest.mark.parametrize("timeout", [0.0, -1.0, float("nan"), float("inf")])
+def test_a_sender_built_with_an_unusable_timeout_fails_into_the_503_path(
+    smsc: FakeSmsc, timeout: float
+) -> None:
+    with pytest.raises(SmppError, match="positive finite"):
+        sender_for(smsc, timeout=timeout).send(port_request())
+    assert smsc.connections == 0
+
+
+@pytest.mark.parametrize("error", [ValueError, OverflowError])
+def test_an_argument_the_socket_layer_refuses_is_a_delivery_failure(
+    smsc: FakeSmsc, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
+) -> None:
+    def refuse(*_args: object, **_kwargs: object) -> socket.socket:
+        raise error(f"refused argument {TEST_MSISDN}")
+
+    monkeypatch.setattr("acs.sms.smpp.socket.create_connection", refuse)
+    with pytest.raises(SmppError, match=f"transport refused: {error.__name__}$") as caught:
+        sender_for(smsc).send(port_request())
+    # The exception text may quote the argument, so it is not carried over.
+    assert TEST_MSISDN not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("smpp_port", 0), ("smpp_port", 65536), ("smpp_timeout_seconds", 61.0)],
+)
+def test_out_of_range_transport_settings_are_refused(field: str, value: float) -> None:
+    with pytest.raises(ValidationError):
+        Settings(env="test", **{field: value})  # type: ignore[arg-type]
 
 
 # -------------------------------------------------------- SMSC-originated PDUs
@@ -510,7 +560,7 @@ def test_a_malformed_message_id_is_noted_without_failing_the_accepted_send(
     output = smpp_log.getvalue()
     assert ("smpp message_id is malformed" in output) is malformed
     if malformed:
-        length = len(message_id.rstrip(b"\x00"))
+        length = min(len(message_id.rstrip(b"\x00")), 65)
         assert f'"message_id_length": {length}' in output
         printable = all(0x20 <= octet <= 0x7E for octet in message_id.rstrip(b"\x00"))
         assert f'"printable": {str(printable).lower()}' in output

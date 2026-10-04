@@ -93,12 +93,17 @@ the unconditional `put_otp` and `delete_otp` are removed.
 
 - `issue_otp` stores the challenge and counts the send unless the cooldown or the
   daily cap applies.
-- `replace_otp` is a compare-and-swap on code hash, creation time and attempt
-  count. Replacing with nothing deletes, and that conditional delete is how a code
+- `replace_otp` is a compare-and-swap on the challenge's identity and attempt
+  count. Identity is a random `challenge_id` assigned at issue; a code and a
+  creation second are not enough, because the same code can be drawn twice
+  within one second. A challenge stored by 1.3 has no id, so for it identity
+  falls back to code hash and creation time. 1.3 ignores the new attribute on
+  read (its `from_item` keeps only declared fields), and drops it when it
+  rewrites a challenge, which the fallback also covers. Replacing with nothing deletes, and that conditional delete is how a code
   is consumed. A wrong guess is a conditional put with the attempt count
   incremented, so each concurrent guess spends exactly one attempt. When an SMS
   cannot be sent, the cleanup deletes only the challenge that was issued for it
-  (same code hash and creation time), never whatever the MSISDN holds by then:
+  (same identity, whatever its attempt count), never whatever the MSISDN holds by then:
   the send can take seconds, and a newer challenge may have been issued
   meanwhile.
 
@@ -111,7 +116,7 @@ OTPQUOTA#<msisdn> SENDS    send times (24 h) + version  TTL
 `issue_otp` reads the challenge and the quota item with `ConsistentRead`, decides,
 then writes both in one `TransactWriteItems`. Each write is conditioned on its
 item being unchanged since the read: `version = :v` on the quota item, the same
-code hash, creation time and attempt count on the challenge, or
+identity and attempt count on the challenge, or
 `attribute_not_exists(pk)` for an item that did not exist. A cancelled
 transaction is treated as contention only when every cancellation reason is
 `ConditionalCheckFailed`; a request that loses re-reads, and normally then meets

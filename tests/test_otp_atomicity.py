@@ -9,6 +9,7 @@ same contract is asserted on the in-memory store and on DynamoDB (moto).
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -495,3 +496,79 @@ def test_a_send_by_this_version_is_counted_by_the_legacy_query(
     )["Item"]
     assert row["entity"] == "otp_send"
     assert int(row["expires_at"]) == now + 86400
+
+
+# ----------------------------------------------- challenge identity and 1.3
+def store_as_1_3(store: Store, legacy: OtpChallenge) -> None:
+    """Write a challenge the way 1.3 did: no challenge_id attribute."""
+    assert not legacy.challenge_id
+    if isinstance(store, MemoryStore):
+        store._otp[legacy.msisdn] = legacy
+        return
+    assert isinstance(store, DynamoDbStore)
+    item = {k: v for k, v in legacy.to_item().items() if k != "challenge_id" and v is not None}
+    item.update({"pk": f"OTP#{legacy.msisdn}", "sk": "CHAL", "entity": "otp"})
+    store._table.put_item(Item=item)
+
+
+def test_every_issued_challenge_carries_a_random_id(otp_store: Store) -> None:
+    policy = otp_mod.OtpPolicy(resend_cooldown_seconds=0)
+    first, _ = otp_mod.create_challenge(otp_store, TEST_MSISDN, TEST_IMSI, policy, now=NOW)
+    second, _ = otp_mod.create_challenge(otp_store, TEST_MSISDN, TEST_IMSI, policy, now=NOW)
+    stored = otp_store.get_otp(TEST_MSISDN)
+    assert stored is not None
+    assert len(first.challenge_id) == 16
+    assert first.challenge_id != second.challenge_id == stored.challenge_id
+
+
+def test_a_challenge_stored_by_1_3_still_verifies_and_discards(otp_store: Store) -> None:
+    policy = otp_mod.OtpPolicy()
+    legacy = OtpChallenge(
+        msisdn=TEST_MSISDN,
+        otp_hash=otp_mod.hash_otp(TEST_MSISDN, "424242"),
+        imsi=TEST_IMSI,
+        created_at=NOW,
+        expires_at=NOW + 300,
+    )
+    store_as_1_3(otp_store, legacy)
+    assert otp_mod.verify_challenge(otp_store, TEST_MSISDN, "000000", policy, now=NOW) == (
+        otp_mod.MISMATCH
+    )
+    assert otp_mod.discard_challenge(otp_store, legacy) is True
+    assert otp_store.get_otp(TEST_MSISDN) is None
+
+    store_as_1_3(otp_store, legacy)
+    assert otp_mod.verify_challenge(otp_store, TEST_MSISDN, "424242", policy, now=NOW) == (
+        otp_mod.VERIFIED
+    )
+
+
+def test_a_challenge_rewritten_by_1_3_without_its_id_is_still_recognised(
+    otp_store: Store,
+) -> None:
+    # 1.3 rewrites the whole item on a wrong guess and drops attributes it does
+    # not know, so the id can disappear underneath a 1.4 task.
+    issued, _ = otp_mod.create_challenge(
+        otp_store, TEST_MSISDN, TEST_IMSI, otp_mod.OtpPolicy(), now=NOW
+    )
+    store_as_1_3(otp_store, dataclasses.replace(issued, challenge_id="", attempts=1))
+    assert otp_mod.discard_challenge(otp_store, issued) is True
+    assert otp_store.get_otp(TEST_MSISDN) is None
+
+
+def test_1_3_reads_a_challenge_carrying_the_new_attribute() -> None:
+    # 1.3's OtpChallenge.from_item (17526ed) keeps only the fields it declares;
+    # this replica of it must accept a 1.4 item without error.
+    legacy_fields = {
+        "msisdn",
+        "otp_hash",
+        "imsi",
+        "created_at",
+        "expires_at",
+        "attempts",
+        "sms_port",
+        "consumed",
+    }
+    item = challenge().to_item() | {"challenge_id": "0123456789abcdef", "pk": "x"}
+    kwargs = {k: v for k, v in item.items() if k in legacy_fields}
+    assert OtpChallenge(**kwargs).otp_hash == "h1"

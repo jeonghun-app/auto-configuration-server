@@ -10,7 +10,7 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "staging", "prod"]
@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     smpp_host: str = ""
     """Operator SMSC for sms_provider=smpp, the only provider that can send a
     port-addressed (silent) OTP."""
-    smpp_port: int = 2775
+    smpp_port: int = Field(default=2775, ge=1, le=65535)
     smpp_system_id: str = ""
     smpp_password: SecretStr = SecretStr("")
     smpp_system_type: str = ""
@@ -130,7 +130,9 @@ class Settings(BaseSettings):
     """SMPP sends the password in clear. Turn off only on a private link to the SMSC."""
     smpp_tls_ca_file: str = ""
     """CA bundle for an SMSC certificate from an operator private CA."""
-    smpp_timeout_seconds: float = 10.0
+    smpp_timeout_seconds: float = Field(default=10.0, gt=0, le=60, allow_inf_nan=False)
+    """Per response. Capped because the request thread waits on it while the
+    client is waiting for its HTTP answer."""
 
     # ---- Operational ------------------------------------------------------
     admin_token: str = ""

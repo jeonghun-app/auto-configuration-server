@@ -442,6 +442,77 @@ def test_dual_written_sends_are_not_counted_twice(
     assert refused == OtpIssueRefused("daily_quota", 3600)
 
 
+def send_as_1_3(store: DynamoDbStore, sent: OtpChallenge) -> None:
+    """Write what 1.3's create_challenge writes: put_otp, then record_otp_send."""
+    item = sent.to_item()
+    item.update({"pk": f"OTP#{sent.msisdn}", "sk": "CHAL", "entity": "otp"})
+    store._put(item)
+    store._table.put_item(
+        Item={
+            "pk": f"OTPSEND#{sent.msisdn}",
+            "sk": str(sent.created_at).zfill(12),
+            "entity": "otp_send",
+            "expires_at": sent.created_at + 86400,
+        }
+    )
+
+
+@pytest.mark.aws
+def test_a_1_3_send_between_two_1_4_sends_holds_the_cooldown_then_the_daily_cap(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
+    send_as_1_3(dynamo_store, challenge(NOW + 61, otp_hash="h13"))
+    soon = NOW + 62
+    assert dynamo_store.issue_otp(challenge(soon, otp_hash="h3"), 60, 2, soon) == (
+        OtpIssueRefused("cooldown", 59)
+    )
+    later = NOW + 200
+    assert dynamo_store.issue_otp(challenge(later, otp_hash="h3"), 60, 2, later) == (
+        OtpIssueRefused("daily_quota", 3600)
+    )
+    stored = dynamo_store.get_otp(TEST_MSISDN)
+    assert stored is not None and stored.otp_hash == "h13"
+
+
+@pytest.mark.aws
+def test_a_merged_1_3_send_is_counted_once_on_every_later_check(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    # Cap of four: 1.4, 1.3, 1.4 (merges the 1.3 send into the quota item),
+    # 1.4, then the fifth is refused. Counting the merged send twice would
+    # refuse the fourth.
+    assert dynamo_store.issue_otp(challenge(), 60, 4, NOW) is None
+    send_as_1_3(dynamo_store, challenge(NOW + 61, otp_hash="h13"))
+    for step, stamp in enumerate((NOW + 122, NOW + 183)):
+        assert dynamo_store.issue_otp(challenge(stamp, otp_hash=f"s{step}"), 60, 4, stamp) is None
+    quota = dynamo_store._get_consistent({"pk": f"OTPQUOTA#{TEST_MSISDN}", "sk": "SENDS"})
+    assert quota is not None
+    assert sorted(int(t) for t in quota["sends"]) == [NOW, NOW + 61, NOW + 122, NOW + 183]
+    last = NOW + 244
+    assert dynamo_store.issue_otp(challenge(last, otp_hash="h5"), 60, 4, last) == (
+        OtpIssueRefused("daily_quota", 3600)
+    )
+
+
+@pytest.mark.aws
+def test_legacy_rows_older_than_a_day_do_not_count_once_the_quota_exists(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
+    stale = NOW - 86401
+    dynamo_store._table.put_item(
+        Item={
+            "pk": f"OTPSEND#{TEST_MSISDN}",
+            "sk": str(stale).zfill(12),
+            "entity": "otp_send",
+            "expires_at": NOW + 3600,
+        }
+    )
+    later = NOW + 61
+    assert dynamo_store.issue_otp(challenge(later, otp_hash="h2"), 60, 2, later) is None
+
+
 def test_distinct_sends_in_the_same_second_each_spend_the_daily_quota(otp_store: Store) -> None:
     assert otp_store.issue_otp(challenge(), 0, 2, NOW) is None
     assert otp_store.issue_otp(challenge(otp_hash="h2"), 0, 2, NOW) is None

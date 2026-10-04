@@ -18,3 +18,9 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    # The interpreter version is a project decision (requires-python, CI, mypy,
+    # ruff and the Makefile move together), not a base-image bump. Patch digests
+    # still arrive.
+    ignore:
+      - dependency-name: python
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]

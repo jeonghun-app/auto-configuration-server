@@ -19,6 +19,11 @@ ENVIRONMENT="prod"
 DESIRED_COUNT="2"
 SMS_PROVIDER="eum"
 SMS_ORIGINATION=""
+SMPP_HOST=""
+SMPP_PORT="2775"
+SMPP_SYSTEM_ID=""
+SMPP_TLS="true"
+SMPP_CIDR=""
 IMAGE_TAG=""
 SKIP_BUILD="false"
 SKIP_VERIFY="false"
@@ -39,8 +44,16 @@ Options:
                             without it the ACS serves plaintext HTTP.
   --environment <env>       staging | prod (default: prod)
   --desired-count <n>       Number of Fargate tasks (default: 2)
-  --sms-provider <p>        eum | sns (default: eum)
+  --sms-provider <p>        eum | sns | smpp (default: eum)
   --sms-origination <id>    AWS End User Messaging origination identity
+  --smpp-host <host>        Operator SMSC (required with --sms-provider smpp)
+  --smpp-port <port>        SMSC port (default: 2775)
+  --smpp-system-id <id>     SMPP system_id (required with --sms-provider smpp)
+  --smpp-cidr <CIDR>        SMSC address range the tasks may reach (required
+                            with --sms-provider smpp)
+  --smpp-tls <true|false>   TLS to the SMSC (default: true). The SMPP password
+                            is never a flag: put it into the SmppPasswordSecretArn
+                            secret after the first deploy.
   --image-tag <tag>         Image tag to build and deploy (default: git sha)
   --skip-build              Reuse the existing image for this tag
   --skip-verify             Do not run the end-to-end verification
@@ -62,6 +75,11 @@ while [[ $# -gt 0 ]]; do
     --desired-count) DESIRED_COUNT="$2"; shift 2 ;;
     --sms-provider) SMS_PROVIDER="$2"; shift 2 ;;
     --sms-origination) SMS_ORIGINATION="$2"; shift 2 ;;
+    --smpp-host) SMPP_HOST="$2"; shift 2 ;;
+    --smpp-port) SMPP_PORT="$2"; shift 2 ;;
+    --smpp-system-id) SMPP_SYSTEM_ID="$2"; shift 2 ;;
+    --smpp-cidr) SMPP_CIDR="$2"; shift 2 ;;
+    --smpp-tls) SMPP_TLS="$2"; shift 2 ;;
     --image-tag) IMAGE_TAG="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD="true"; shift ;;
     --skip-verify) SKIP_VERIFY="true"; shift ;;
@@ -88,6 +106,13 @@ If a globally reachable ACS is genuinely what you want, edit the AllowedCidr
 parameter on the stack directly, after putting a WAF rate-based rule in front.
 REFUSE
   exit 2
+fi
+
+if [[ "$SMS_PROVIDER" == "smpp" ]]; then
+  if [[ -z "$SMPP_HOST" || -z "$SMPP_SYSTEM_ID" || -z "$SMPP_CIDR" ]]; then
+    echo "error: --sms-provider smpp requires --smpp-host, --smpp-system-id and --smpp-cidr" >&2
+    exit 2
+  fi
 fi
 
 if [[ -z "$CERT_ARN" ]]; then
@@ -161,6 +186,11 @@ PARAMS=(
   "DesiredCount=${DESIRED_COUNT}"
   "SmsProvider=${SMS_PROVIDER}"
   "SmsOriginationIdentity=${SMS_ORIGINATION}"
+  "SmppHost=${SMPP_HOST}"
+  "SmppPort=${SMPP_PORT}"
+  "SmppSystemId=${SMPP_SYSTEM_ID}"
+  "SmppTls=${SMPP_TLS}"
+  "SmppSmscCidr=${SMPP_CIDR}"
   "CertificateArn=${CERT_ARN}"
 )
 aws cloudformation deploy \
@@ -222,3 +252,15 @@ at the load balancer, with a certificate covering that name.
 Tear down with: scripts/teardown.sh --stack-prefix ${STACK_PREFIX} --region ${REGION}
 ==============================================================
 SUMMARY
+
+if [[ "$SMS_PROVIDER" == "smpp" ]]; then
+  cat <<SMPP
+
+SMPP: every OTP answers 503 until the operator-issued password replaces the
+random placeholder in the secret named by the SmppPasswordSecretArn output of
+${APP_STACK}. Put it, then force a new deployment of the ECS service so the
+tasks read it:
+  aws secretsmanager put-secret-value --region ${REGION} --secret-id <arn> \\
+      --secret-string file://<file holding the password>
+SMPP
+fi

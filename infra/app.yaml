@@ -4,7 +4,8 @@ Description: >
   managed service: ECS Fargate for compute, Application Load Balancer for
   ingress, DynamoDB for state, Secrets Manager for the admin credential,
   CloudWatch Logs and CloudWatch metrics (via embedded metric format) for
-  observability, and AWS End User Messaging SMS or Amazon SNS for OTP delivery.
+  observability, and AWS End User Messaging SMS or Amazon SNS for OTP delivery,
+  or an operator SMSC over SMPP for port-addressed OTP.
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -23,6 +24,8 @@ Metadata:
           - SmsOriginationIdentity
           - TrustedProxyCidrs
           - DmEnabled
+      - Label: { default: Operator SMSC (SmsProvider=smpp) }
+        Parameters: [SmppHost, SmppPort, SmppSystemId, SmppTls, SmppSmscCidr]
       - Label: { default: Observability and privacy }
         Parameters: [LogRetentionDays, PiiLogMode, AlbAccessLogBucket]
 
@@ -96,16 +99,50 @@ Parameters:
   SmsProvider:
     Type: String
     Default: eum
-    AllowedValues: [eum, sns]
+    AllowedValues: [eum, sns, smpp]
     Description: >
-      eum = AWS End User Messaging SMS (recommended), sns = Amazon SNS. Neither
-      can send the port-addressed binary SMS that silent OTP delivery needs; see
-      docs/limitations.md.
+      eum = AWS End User Messaging SMS (recommended for text OTP), sns = Amazon
+      SNS. Neither can send the port-addressed binary SMS that silent OTP delivery
+      needs. smpp = an operator SMSC over SMPP 3.4, which can; it needs the Smpp*
+      parameters and the password set in the SmppPasswordSecret output.
 
   SmsOriginationIdentity:
     Type: String
     Default: ''
     Description: AWS End User Messaging origination identity (phone number or pool ARN).
+
+  SmppHost:
+    Type: String
+    Default: ''
+    Description: Operator SMSC host name or address. Required when SmsProvider=smpp.
+
+  SmppPort:
+    Type: Number
+    Default: 2775
+    MinValue: 1
+    MaxValue: 65535
+
+  SmppSystemId:
+    Type: String
+    Default: ''
+    MaxLength: 15
+    Description: SMPP system_id issued by the operator. Required when SmsProvider=smpp.
+
+  SmppTls:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      SMPP sends the password in clear. Set false only when the SMSC is reached
+      over a private link.
+
+  SmppSmscCidr:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$'
+    Description: >
+      Address range of the SMSC. The tasks may only open SmppPort to this range.
+      Required when SmsProvider=smpp.
 
   TrustedProxyCidrs:
     Type: String
@@ -143,7 +180,19 @@ Parameters:
       store of subscriber-identifying data, so you must create it yourself with a
       bucket policy permitting ELB log delivery and a retention rule you own.
 
+Rules:
+  SmppNeedsAnSmsc:
+    RuleCondition: !Equals [!Ref SmsProvider, smpp]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref SmppHost, '']]
+        AssertDescription: SmsProvider=smpp requires SmppHost.
+      - Assert: !Not [!Equals [!Ref SmppSystemId, '']]
+        AssertDescription: SmsProvider=smpp requires SmppSystemId.
+      - Assert: !Not [!Equals [!Ref SmppSmscCidr, '']]
+        AssertDescription: SmsProvider=smpp requires SmppSmscCidr.
+
 Conditions:
+  UseSmpp: !Equals [!Ref SmsProvider, smpp]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
   WantAlbAccessLogs: !Not [!Equals [!Ref AlbAccessLogBucket, '']]
 
@@ -282,6 +331,17 @@ Resources:
           Description: AWS service APIs (DynamoDB, Secrets Manager, ECR, logs, SMS)
       Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-task-sg' }]
 
+  TaskEgressToSmsc:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: UseSmpp
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref SmppPort
+      ToPort: !Ref SmppPort
+      CidrIp: !Ref SmppSmscCidr
+      Description: SMPP to the operator SMSC
+
   TaskIngressFromAlb:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
@@ -344,6 +404,21 @@ Resources:
         ExcludePunctuation: true
         IncludeSpace: false
 
+  # The SMSC password is issued by the operator, so it cannot be generated here.
+  # The random placeholder (SMPP passwords are at most 8 characters) keeps the
+  # task startable and makes every bind fail, answering 503, until the real value
+  # is put into the secret and the service is redeployed.
+  SmppPasswordSecret:
+    Type: AWS::SecretsManager::Secret
+    Condition: UseSmpp
+    Properties:
+      Name: !Sub '${AWS::StackName}/smpp-password'
+      Description: SMPP password for the operator SMSC (replace the placeholder)
+      GenerateSecretString:
+        PasswordLength: 8
+        ExcludePunctuation: true
+        IncludeSpace: false
+
   # ------------------------------------------------------------------- roles
   ExecutionRole:
     Type: AWS::IAM::Role
@@ -363,7 +438,10 @@ Resources:
             Statement:
               - Effect: Allow
                 Action: [secretsmanager:GetSecretValue]
-                Resource: [!Ref AdminTokenSecret, !Ref PiiHashSecret]
+                Resource:
+                  - !Ref AdminTokenSecret
+                  - !Ref PiiHashSecret
+                  - !If [UseSmpp, !Ref SmppPasswordSecret, !Ref AWS::NoValue]
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -521,6 +599,10 @@ Resources:
             - { Name: ACS_TABLE_NAME, Value: !Ref Table }
             - { Name: ACS_SMS_PROVIDER, Value: !Ref SmsProvider }
             - { Name: ACS_SMS_ORIGINATION_IDENTITY, Value: !Ref SmsOriginationIdentity }
+            - { Name: ACS_SMPP_HOST, Value: !Ref SmppHost }
+            - { Name: ACS_SMPP_PORT, Value: !Ref SmppPort }
+            - { Name: ACS_SMPP_SYSTEM_ID, Value: !Ref SmppSystemId }
+            - { Name: ACS_SMPP_TLS, Value: !Ref SmppTls }
             - { Name: ACS_DEFAULT_RCS_PROFILE, Value: !Ref DefaultRcsProfile }
             - { Name: ACS_PROVISIONING_VALIDITY_SECONDS, Value: !Ref ProvisioningValiditySeconds }
             - { Name: ACS_TRUSTED_PROXY_CIDRS, Value: !Ref TrustedProxyCidrs }
@@ -536,6 +618,10 @@ Resources:
           Secrets:
             - { Name: ACS_ADMIN_TOKEN, ValueFrom: !Ref AdminTokenSecret }
             - { Name: ACS_PII_HASH_SECRET, ValueFrom: !Ref PiiHashSecret }
+            - !If
+              - UseSmpp
+              - { Name: ACS_SMPP_PASSWORD, ValueFrom: !Ref SmppPasswordSecret }
+              - !Ref AWS::NoValue
 
   Service:
     Type: AWS::ECS::Service
@@ -674,6 +760,13 @@ Outputs:
   AdminTokenSecretArn:
     Description: Secrets Manager ARN holding the admin API bearer token.
     Value: !Ref AdminTokenSecret
+
+  SmppPasswordSecretArn:
+    Condition: UseSmpp
+    Description: >
+      Secrets Manager ARN for the SMSC password. Put the operator-issued value,
+      then force a new deployment of the service so the tasks read it.
+    Value: !Ref SmppPasswordSecret
 
   TableName:
     Description: DynamoDB table backing the ACS.

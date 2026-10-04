@@ -3,7 +3,7 @@ httpx==0.28.1
 pytest==9.1.1
 pytest-cov==7.1.0
 moto[dynamodb]==5.2.3
-ruff==0.16.4
+ruff==0.16.9
 mypy==2.3.1
-cfn-lint==1.55.1
-types-PyYAML==6.0.12.20260815
+cfn-lint==1.57.1
+types-PyYAML==6.0.12.20260906

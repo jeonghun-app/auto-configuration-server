@@ -21,6 +21,14 @@ class OtpIssueRefused:
     retry_after: int
 
 
+class OtpStoreContention(RuntimeError):
+    """Concurrent writers for one MSISDN kept winning; nothing was stored.
+
+    Distinct from a cooldown: answering "pending" would leave the client waiting
+    for an SMS that was never sent.
+    """
+
+
 @runtime_checkable
 class Store(Protocol):
     """Everything the ACS needs to persist."""
@@ -33,14 +41,12 @@ class Store(Protocol):
     def list_subscribers(self, limit: int = 100) -> list[Subscriber]: ...
 
     # ---- OTP challenges ---------------------------------------------------
-    def put_otp(self, challenge: OtpChallenge) -> None: ...
+    # issue_otp and replace_otp are the only ways to change a challenge; there is
+    # deliberately no unconditional put or delete. Each is atomic per MSISDN, also
+    # across ECS tasks: a separate read and write would let concurrent requests
+    # exceed the daily cap, verify one code twice, or delete a newer challenge.
     def get_otp(self, msisdn: str) -> OtpChallenge | None: ...
-    def delete_otp(self, msisdn: str) -> None: ...
 
-    # The two operations below are the only ones the OTP flow may use to change
-    # a challenge. Each is atomic per MSISDN, also across ECS tasks: a separate
-    # read and write would let concurrent requests exceed the daily cap or
-    # verify one code twice.
     def issue_otp(
         self,
         challenge: OtpChallenge,
@@ -52,7 +58,8 @@ class Store(Protocol):
 
         The cooldown applies while an unconsumed, unexpired challenge younger than
         ``cooldown_seconds`` exists. The cap counts sends in the 24 hours before
-        ``now``.
+        ``now``. Raises :class:`OtpStoreContention` if concurrent writers keep
+        winning.
         """
         ...
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
+from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN, clear_otp
 
 from acs.auth import otp as otp_mod
 from acs.auth import token as token_mod
@@ -124,7 +124,7 @@ def test_token_skips_the_otp_challenge(
     service.handle(query())
     first = service.handle(query(otp=read_otp(seeded_store)))
     token = _token_from(first.body)
-    seeded_store.delete_otp(TEST_MSISDN)
+    clear_otp(seeded_store)
 
     outcome = service.handle(query(token=token, vers=0))
     assert outcome.status_code == 200
@@ -256,7 +256,7 @@ def test_daily_quota_exhaustion_returns_429(settings: Settings, seeded_store: Me
     )
     service = ProvisioningService(tight, seeded_store, MockSmsSender(seeded_store))
     assert service.handle(query()).status_code == 200
-    seeded_store.delete_otp(TEST_MSISDN)
+    clear_otp(seeded_store)
     outcome = service.handle(query())
     assert outcome.status_code == 429
     assert "Retry-After" in outcome.headers

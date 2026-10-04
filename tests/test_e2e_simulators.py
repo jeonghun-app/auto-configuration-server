@@ -17,6 +17,7 @@ from xml.etree import ElementTree
 import httpx
 import pytest
 import uvicorn
+from tests.conftest import clear_otp
 from tools.dm_client_sim import Checker as DmChecker
 from tools.dm_client_sim import DmClientSimulator, run_session
 from tools.rcs_client_sim import Checker, RcsClientSimulator, scenario_disabled, scenario_full
@@ -120,7 +121,7 @@ def test_disabled_subscriber_scenario(server: LiveServer, live_store: MemoryStor
     subscriber.forced_vers = -2
     live_store.put_subscriber(subscriber)
     live_store.revoke_tokens_for_imsi(TEST_IMSI)
-    live_store.delete_otp(TEST_MSISDN)
+    clear_otp(live_store, TEST_MSISDN)
 
     sim = make_sim(server)
     sim.msisdn = TEST_MSISDN
@@ -141,7 +142,7 @@ def test_disabled_subscriber_scenario(server: LiveServer, live_store: MemoryStor
         sim.close()
         subscriber.forced_vers = None
         live_store.put_subscriber(subscriber)
-        live_store.delete_otp(TEST_MSISDN)
+        clear_otp(live_store, TEST_MSISDN)
     assert checker.failures == []
 
 
@@ -159,7 +160,7 @@ def test_oma_dm_session_uses_the_password_bootstrapped_by_oma_cp(
     server: LiveServer, live_store: MemoryStore
 ) -> None:
     # 1. RCS provisioning, which emits the w7 DM account.
-    live_store.delete_otp(TEST_MSISDN)
+    clear_otp(live_store, TEST_MSISDN)
     sim = make_sim(server)
     try:
         sim.request_configuration()

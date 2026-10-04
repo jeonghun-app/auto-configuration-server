@@ -92,7 +92,7 @@ MAX_GSM7_CHARACTERS: Final = 160
 # "_", the brackets and the backtick are not in this set because their GSM codes
 # differ from ASCII.
 _GSM7_ASCII_SAFE: Final = frozenset(
-    " !\"#%&'()*+,-./0123456789:;<=>?" "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+    " !\"#%&'()*+,-./0123456789:;<=>?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 )
 
 # C-Octet String maximum lengths, including the terminating NUL.
@@ -397,12 +397,14 @@ class SmppSmsSender:
         """
         end = submit_sm_resp_body.find(b"\x00")
         raw = submit_sm_resp_body if end < 0 else submit_sm_resp_body[:end]
-        if end < 0 or end + 1 > _MAX_MESSAGE_ID:
+        printable = all(0x20 <= octet <= 0x7E for octet in raw)
+        if end < 0 or end + 1 > _MAX_MESSAGE_ID or not printable:
             log.warning(
                 "smpp message_id is malformed",
                 extra={
                     "message_id_length": len(raw),
                     "terminated": end >= 0,
+                    "printable": printable,
                     "smsc": self._host,
                 },
             )

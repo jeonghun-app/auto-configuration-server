@@ -59,18 +59,10 @@ class MemoryStore:
     # ---- OTP --------------------------------------------------------------
     # Challenges are copied in and out, as DynamoDB would, so a caller mutating
     # the object it read cannot change the stored state behind replace_otp.
-    def put_otp(self, challenge: OtpChallenge) -> None:
-        with self._lock:
-            self._otp[challenge.msisdn] = dataclasses.replace(challenge)
-
     def get_otp(self, msisdn: str) -> OtpChallenge | None:
         with self._lock:
             challenge = self._otp.get(msisdn)
             return dataclasses.replace(challenge) if challenge else None
-
-    def delete_otp(self, msisdn: str) -> None:
-        with self._lock:
-            self._otp.pop(msisdn, None)
 
     def issue_otp(
         self,

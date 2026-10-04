@@ -20,6 +20,7 @@ from acs.domain.models import Subscriber
 from acs.domain.service import ProvisioningService
 from acs.protocol.omacp import writer
 from acs.sms.base import SmsDeliveryFailed, SmsRequest, SmsResult
+from acs.store.base import OtpStoreContention
 from acs.store.memory import MemoryStore
 
 
@@ -305,3 +306,17 @@ def test_a_slow_sms_send_does_not_block_other_requests(
     sender.released.set()
     worker.join(timeout=5)
     assert sender.released_in_time
+
+
+def test_msisdn_flow_survives_store_contention(
+    client: TestClient, seeded_store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def contended(*_args: object, **_kwargs: object) -> None:
+        raise OtpStoreContention("busy")
+
+    monkeypatch.setattr(seeded_store, "issue_otp", contended)
+    page = client.get("/msisdn")
+    csrf = page.text.split('name="csrf" value="')[1].split('"')[0]
+    submitted = client.post("/msisdn", data={"msisdn": TEST_MSISDN, "csrf": csrf})
+    assert submitted.status_code == 200
+    assert "If that number is eligible" in submitted.text

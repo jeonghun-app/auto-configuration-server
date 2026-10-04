@@ -79,7 +79,9 @@ def create_challenge(
 ) -> tuple[OtpChallenge, str]:
     """Create and persist a challenge, returning it with the clear-text OTP.
 
-    Raises :class:`SendBlocked` when a cooldown or the daily cap applies. An
+    Raises :class:`SendBlocked` when a cooldown or the daily cap applies, and
+    :class:`~acs.store.base.OtpStoreContention` when concurrent requests for the
+    same MSISDN kept conflicting. An
     existing, still valid challenge is replaced only after the cooldown, so
     repeated identical bootstrap requests do not each cost an SMS.
     """
@@ -153,6 +155,26 @@ def verify_challenge(
         if store.replace_otp(challenge, replacement):
             return outcome
     return MISMATCH
+
+
+def discard_challenge(store: Store, challenge: OtpChallenge) -> bool:
+    """Delete ``challenge`` if it is still the stored one, whatever its attempts.
+
+    For a challenge whose SMS could not be sent. The send can take seconds, and
+    meanwhile the challenge may have been exhausted and a new one issued; deleting
+    by MSISDN alone would destroy the new challenge, whose code is on its way.
+    """
+    for _ in range(_VERIFY_ROUNDS):
+        current = store.get_otp(challenge.msisdn)
+        if current is None or (current.otp_hash, current.created_at) != (
+            challenge.otp_hash,
+            challenge.created_at,
+        ):
+            return False
+        # Attempts may still move under us; the next round re-reads them.
+        if store.replace_otp(current, None):
+            return True
+    return False
 
 
 def policy_from_settings(settings: object) -> OtpPolicy:

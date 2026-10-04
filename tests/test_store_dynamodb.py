@@ -119,22 +119,21 @@ def test_listing_uses_the_secondary_index(ddb_store: DynamoDbStore) -> None:
 
 def test_otp_challenge_round_trip_and_ttl(ddb_store: DynamoDbStore) -> None:
     now = int(time.time())
-    ddb_store.put_otp(
-        OtpChallenge(
-            msisdn=MSISDN,
-            otp_hash="abc",
-            imsi=IMSI,
-            created_at=now,
-            expires_at=now + 300,
-            sms_port=37273,
-        )
+    challenge = OtpChallenge(
+        msisdn=MSISDN,
+        otp_hash="abc",
+        imsi=IMSI,
+        created_at=now,
+        expires_at=now + 300,
+        sms_port=37273,
     )
+    assert ddb_store.issue_otp(challenge, 60, 5, now) is None
     loaded = ddb_store.get_otp(MSISDN)
     assert loaded is not None
     assert loaded.otp_hash == "abc"
     assert loaded.sms_port == 37273
     assert isinstance(loaded.expires_at, int)
-    ddb_store.delete_otp(MSISDN)
+    assert ddb_store.replace_otp(loaded, None) is True
     assert ddb_store.get_otp(MSISDN) is None
 
 

@@ -6,6 +6,7 @@ Table design (partition key ``pk``, sort key ``sk``)::
     MSISDN#<msisdn>  SUB           reverse index -> imsi
     OTP#<msisdn>     CHAL          pending OTP challenge          (TTL)
     OTPQUOTA#<msisdn> SENDS        send times for the daily cap   (TTL)
+    OTPSEND#<msisdn> <epoch>       legacy send rows, read once to seed OTPQUOTA#
     TOKEN#<sha256>   META          provisioning token            (TTL)
     DEV#<device_id>  META          managed device
     DMSESS#<sid>     META          OMA-DM session state           (TTL)
@@ -29,7 +30,7 @@ from botocore.exceptions import ClientError
 
 from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
 from acs.observability import get_logger
-from acs.store.base import OtpIssueRefused
+from acs.store.base import OtpIssueRefused, OtpStoreContention
 
 log = get_logger(__name__)
 
@@ -73,6 +74,17 @@ def _same_challenge_values(challenge: OtpChallenge) -> dict[str, Any]:
         ":c": challenge.created_at,
         ":a": challenge.attempts,
     }
+
+
+def _lost_a_condition(exc: ClientError) -> bool:
+    """Whether a cancelled transaction failed only on its conditions."""
+    if exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    codes = {
+        str(reason.get("Code", "None")) for reason in exc.response.get("CancellationReasons", [])
+    }
+    codes.discard("None")
+    return codes == {"ConditionalCheckFailed"}
 
 
 class DynamoDbStore:
@@ -168,17 +180,9 @@ class DynamoDbStore:
         return [Subscriber.from_item(i) for i in items]
 
     # ---- OTP --------------------------------------------------------------
-    def put_otp(self, challenge: OtpChallenge) -> None:
-        item = challenge.to_item()
-        item.update({"pk": f"OTP#{challenge.msisdn}", "sk": "CHAL", "entity": "otp"})
-        self._put(item)
-
     def get_otp(self, msisdn: str) -> OtpChallenge | None:
         item = self._get(f"OTP#{msisdn}", "CHAL")
         return OtpChallenge.from_item(item) if item else None
-
-    def delete_otp(self, msisdn: str) -> None:
-        self._delete(f"OTP#{msisdn}", "CHAL")
 
     def issue_otp(
         self,
@@ -202,7 +206,8 @@ class DynamoDbStore:
                 age = now - existing.created_at
                 if age < cooldown_seconds:
                     return OtpIssueRefused("cooldown", cooldown_seconds - age)
-            sends = [int(t) for t in (quota or {}).get("sends", []) if int(t) >= now - 86400]
+            history = quota["sends"] if quota else self._legacy_sends(msisdn, now)
+            sends = [int(t) for t in history if int(t) >= now - 86400]
             if len(sends) >= max_sends_per_day:
                 return OtpIssueRefused("daily_quota", 3600)
 
@@ -236,12 +241,30 @@ class DynamoDbStore:
                     TransactItems=[{"Put": quota_put}, {"Put": challenge_put}]
                 )
             except ClientError as exc:
-                if exc.response["Error"]["Code"] != "TransactionCanceledException":
+                if not _lost_a_condition(exc):
+                    # Throttling, validation or capacity: a fault, not contention,
+                    # and retrying it here would only hide it.
                     raise
                 continue
             return None
         log.warning("otp issue lost every optimistic write round")
-        return OtpIssueRefused("cooldown", cooldown_seconds)
+        raise OtpStoreContention("concurrent OTP issue for one MSISDN kept conflicting")
+
+    def _legacy_sends(self, msisdn: str, now: int) -> list[int]:
+        """Send times from the OTPSEND# rows written before the quota item existed.
+
+        Read once, when the quota item is first created, so the deployment that
+        introduced it does not reset every daily count to zero. The rows expire by
+        TTL within 24 hours, after which this finds nothing.
+        """
+        from boto3.dynamodb.conditions import Key
+
+        response = self._table.query(
+            KeyConditionExpression=Key("pk").eq(f"OTPSEND#{msisdn}")
+            & Key("sk").gte(str(now - 86400).zfill(12)),
+            ConsistentRead=True,
+        )
+        return [int(item["sk"]) for item in response.get("Items", [])]
 
     def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
         key = {"pk": f"OTP#{expected.msisdn}", "sk": "CHAL"}

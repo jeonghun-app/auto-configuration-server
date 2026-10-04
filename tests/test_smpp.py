@@ -494,8 +494,10 @@ def test_the_audit_record_never_holds_the_otp(smsc: FakeSmsc) -> None:
         (b"x" * 64 + b"\x00", False),
         (b"x" * 65 + b"\x00", True),
         (b"x" * 300, True),
+        (b"x\x1b[2Jx" * 4 + b"\x00", True),
+        ("xé".encode() * 4 + b"\x00", True),
     ],
-    ids=["64-characters", "65-characters", "unterminated"],
+    ids=["64-characters", "65-characters", "unterminated", "control-octets", "non-ascii"],
 )
 def test_a_malformed_message_id_is_noted_without_failing_the_accepted_send(
     smsc: FakeSmsc, smpp_log: io.StringIO, message_id: bytes, malformed: bool
@@ -510,7 +512,10 @@ def test_a_malformed_message_id_is_noted_without_failing_the_accepted_send(
     if malformed:
         length = len(message_id.rstrip(b"\x00"))
         assert f'"message_id_length": {length}' in output
+        printable = all(0x20 <= octet <= 0x7E for octet in message_id.rstrip(b"\x00"))
+        assert f'"printable": {str(printable).lower()}' in output
     assert "x" * 20 not in output
+    assert "\x1b" not in output
 
 
 def test_an_smsc_message_id_carrying_subscriber_data_is_never_recorded(

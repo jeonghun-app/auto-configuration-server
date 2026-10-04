@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Iterator
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import pytest
+from botocore.exceptions import ClientError
 from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
 from tests.test_store_dynamodb import REGION, TABLE, create_table
 
@@ -22,8 +23,8 @@ from acs.config import Settings
 from acs.domain.models import OtpChallenge, Subscriber
 from acs.domain.service import ProvisioningService
 from acs.protocol.request import ConfigQuery
-from acs.sms.base import MockSmsSender
-from acs.store.base import OtpIssueRefused, Store
+from acs.sms.base import MockSmsSender, SmsDeliveryFailed, SmsRequest, SmsResult
+from acs.store.base import OtpIssueRefused, OtpStoreContention, Store
 from acs.store.dynamodb import DynamoDbStore
 from acs.store.memory import MemoryStore
 
@@ -261,8 +262,10 @@ def test_a_store_that_always_conflicts_refuses_the_send(
         "_get_consistent",
         lambda key: {**stale, "attempts": 7} if key["sk"] == "CHAL" else None,
     )
-    refused = otp_store.issue_otp(challenge(otp_hash="new"), 60, 5, NOW)
-    assert refused == OtpIssueRefused("cooldown", 60)
+    # Losing every round is contention, not a cooldown: "pending" would leave the
+    # client waiting for an SMS that was never sent.
+    with pytest.raises(OtpStoreContention):
+        otp_store.issue_otp(challenge(otp_hash="new"), 60, 5, NOW)
 
 
 def test_verification_that_loses_every_round_is_not_verified(store: MemoryStore) -> None:
@@ -299,3 +302,171 @@ def test_concurrent_bootstrap_requests_send_one_otp_under_a_cap_of_one(
     metrics = race(THREADS, lambda: service.handle(query).metric)
     assert metrics.count("OtpSent") == 1
     assert len(store.list_sms(TEST_MSISDN)) == 1
+
+
+# ------------------------------------------------- transaction cancellations
+def cancelled(*codes: str) -> ClientError:
+    return ClientError(
+        {
+            "Error": {"Code": "TransactionCanceledException", "Message": "cancelled"},
+            "CancellationReasons": [{"Code": code} for code in codes],
+        },
+        "TransactWriteItems",
+    )
+
+
+@pytest.mark.aws
+@pytest.mark.parametrize(
+    "codes",
+    [
+        ("ProvisionedThroughputExceeded", "None"),
+        ("ThrottlingError", "None"),
+        ("ValidationError", "None"),
+        ("ConditionalCheckFailed", "ThrottlingError"),
+    ],
+    ids=["throughput", "throttling", "validation", "condition-and-throttling"],
+)
+def test_a_cancellation_for_any_other_reason_is_raised_not_retried(
+    dynamo_store: DynamoDbStore, monkeypatch: pytest.MonkeyPatch, codes: tuple[str, ...]
+) -> None:
+    calls: list[int] = []
+
+    def fail(**_kwargs: object) -> None:
+        calls.append(1)
+        raise cancelled(*codes)
+
+    monkeypatch.setattr(dynamo_store._table.meta.client, "transact_write_items", fail)
+    with pytest.raises(ClientError):
+        dynamo_store.issue_otp(challenge(), 60, 5, NOW)
+    assert len(calls) == 1
+
+
+@pytest.mark.aws
+def test_a_cancellation_on_conditions_alone_is_retried_as_contention(
+    dynamo_store: DynamoDbStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def fail(**_kwargs: object) -> None:
+        calls.append(1)
+        raise cancelled("ConditionalCheckFailed", "None")
+
+    monkeypatch.setattr(dynamo_store._table.meta.client, "transact_write_items", fail)
+    with pytest.raises(OtpStoreContention):
+        dynamo_store.issue_otp(challenge(), 60, 5, NOW)
+    assert len(calls) == 5
+
+
+@pytest.mark.aws
+def test_a_real_condition_failure_reports_conditional_check_failed(
+    dynamo_store: DynamoDbStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Guards the parsing above against the shape moto/botocore actually produce.
+    seen: list[ClientError] = []
+    original = dynamo_store._table.meta.client.transact_write_items
+
+    def spy(**kwargs: Any) -> Any:
+        try:
+            return original(**kwargs)
+        except ClientError as exc:
+            seen.append(exc)
+            raise
+
+    dynamo_store.issue_otp(challenge(NOW - 3600), 60, 5, NOW - 3600)
+    stale = dynamo_store._get_consistent({"pk": f"OTP#{TEST_MSISDN}", "sk": "CHAL"})
+    assert stale is not None
+    monkeypatch.setattr(dynamo_store._table.meta.client, "transact_write_items", spy)
+    monkeypatch.setattr(
+        dynamo_store,
+        "_get_consistent",
+        lambda key: {**stale, "attempts": 7} if key["sk"] == "CHAL" else None,
+    )
+    with pytest.raises(OtpStoreContention):
+        dynamo_store.issue_otp(challenge(otp_hash="new"), 60, 5, NOW)
+    reasons = [r["Code"] for r in seen[0].response["CancellationReasons"]]
+    assert "ConditionalCheckFailed" in reasons
+
+
+# --------------------------------------------------- legacy quota migration
+@pytest.mark.aws
+def test_the_first_quota_item_is_seeded_from_legacy_send_rows(
+    dynamo_store: DynamoDbStore,
+) -> None:
+    # Rows in the format written before OTPQUOTA# existed: two within the last
+    # day, one older. A cap of three leaves room for exactly one more send.
+    for stamp in (NOW - 90000, NOW - 3600, NOW - 60):
+        dynamo_store._table.put_item(
+            Item={
+                "pk": f"OTPSEND#{TEST_MSISDN}",
+                "sk": str(stamp).zfill(12),
+                "entity": "otp_send",
+                "expires_at": stamp + 86400,
+            }
+        )
+    assert dynamo_store.issue_otp(challenge(), 0, 3, NOW) is None
+    refused = dynamo_store.issue_otp(challenge(NOW + 1, otp_hash="h2"), 0, 3, NOW + 1)
+    assert refused == OtpIssueRefused("daily_quota", 3600)
+
+
+# ------------------------------------------------------- failure cleanup
+class LateFailingSender:
+    """Fails only after the challenge it was sent for was exhausted and replaced."""
+
+    name = "late"
+
+    def __init__(self, store: Store, policy: otp_mod.OtpPolicy) -> None:
+        self._store = store
+        self._policy = policy
+        self.replacement: OtpChallenge | None = None
+
+    def send(self, request: SmsRequest) -> SmsResult:
+        for _ in range(self._policy.max_attempts):
+            otp_mod.verify_challenge(self._store, TEST_MSISDN, "wrong!", self._policy)
+        self.replacement, _ = otp_mod.create_challenge(
+            self._store, TEST_MSISDN, TEST_IMSI, self._policy
+        )
+        raise SmsDeliveryFailed("SMSC did not answer")
+
+
+def test_a_late_send_failure_does_not_delete_a_newer_challenge(
+    otp_store: Store, settings: Settings
+) -> None:
+    otp_store.put_subscriber(Subscriber(imsi=TEST_IMSI, msisdn=TEST_MSISDN, entitled=True))
+    open_policy = settings.model_copy(update={"otp_resend_cooldown_seconds": 0})
+    sender = LateFailingSender(otp_store, otp_mod.policy_from_settings(open_policy))
+    service = ProvisioningService(open_policy, otp_store, sender)
+    outcome = service.handle(ConfigQuery(imsi=TEST_IMSI, imei=TEST_IMEI, vers=0))
+    assert outcome.metric == "OtpDeliveryFailed"
+    survivor = otp_store.get_otp(TEST_MSISDN)
+    assert sender.replacement is not None
+    assert survivor is not None
+    assert survivor.otp_hash == sender.replacement.otp_hash
+
+
+def test_discarding_removes_the_failed_challenge_even_after_a_wrong_guess(
+    otp_store: Store,
+) -> None:
+    policy = otp_mod.OtpPolicy()
+    issued, _ = otp_mod.create_challenge(otp_store, TEST_MSISDN, TEST_IMSI, policy, now=NOW)
+    otp_mod.verify_challenge(otp_store, TEST_MSISDN, "wrong!", policy, now=NOW)
+    assert otp_mod.discard_challenge(otp_store, issued) is True
+    assert otp_store.get_otp(TEST_MSISDN) is None
+    assert otp_mod.discard_challenge(otp_store, issued) is False
+
+
+def test_contention_answers_503_without_a_pending_signal(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    class Contended(MemoryStore):
+        def issue_otp(self, *args: Any, **kwargs: Any) -> OtpIssueRefused | None:
+            raise OtpStoreContention("busy")
+
+    store = Contended()
+    for item in seeded_store.list_subscribers():
+        store.put_subscriber(item)
+    service = ProvisioningService(settings, store, MockSmsSender(store))
+    outcome = service.handle(ConfigQuery(imsi=TEST_IMSI, imei=TEST_IMEI, vers=0))
+    assert outcome.status_code == 503
+    assert outcome.headers["Retry-After"] == "5"
+    assert (outcome.metric, outcome.detail) == ("OtpStoreContention", "otp_store_contention")
+    assert store.list_sms(TEST_MSISDN) == []

@@ -27,7 +27,7 @@ development and unit tests, and is refused in staging and production at startup.
 SUB#<imsi>       META      subscriber record          gsi1pk=ENTITY#subscriber
 MSISDN#<msisdn>  SUB       reverse index -> imsi
 OTP#<msisdn>     CHAL      pending challenge          TTL
-OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (superseded, see Amendment)
+OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (superseded, read once to seed OTPQUOTA#)
 TOKEN#<sha256>   META      token                      gsi1pk=TOKENIMSI#<imsi>, TTL
 DEV#<device_id>  META      managed device             gsi1pk=ENTITY#device
 DMSESS#<sid>     META      DM session state           TTL
@@ -88,15 +88,19 @@ SMS-pumping and replay exposure the limits exist to prevent.
 
 ### Decision
 
-The store offers two atomic operations, and the OTP flow changes a challenge
-through nothing else:
+The store offers two atomic operations and no other way to change a challenge:
+the unconditional `put_otp` and `delete_otp` are removed.
 
 - `issue_otp` stores the challenge and counts the send unless the cooldown or the
   daily cap applies.
 - `replace_otp` is a compare-and-swap on code hash, creation time and attempt
   count. Replacing with nothing deletes, and that conditional delete is how a code
   is consumed. A wrong guess is a conditional put with the attempt count
-  incremented, so each concurrent guess spends exactly one attempt.
+  incremented, so each concurrent guess spends exactly one attempt. When an SMS
+  cannot be sent, the cleanup deletes only the challenge that was issued for it
+  (same code hash and creation time), never whatever the MSISDN holds by then:
+  the send can take seconds, and a newer challenge may have been issued
+  meanwhile.
 
 The send history moves from one row per send to one versioned item:
 
@@ -108,9 +112,14 @@ OTPQUOTA#<msisdn> SENDS    send times (24 h) + version  TTL
 then writes both in one `TransactWriteItems`. Each write is conditioned on its
 item being unchanged since the read: `version = :v` on the quota item, the same
 code hash, creation time and attempt count on the challenge, or
-`attribute_not_exists(pk)` for an item that did not exist. A request that loses
-re-reads, and normally then meets the cooldown. After five lost rounds it fails
-closed: no send, and a verification is not verified.
+`attribute_not_exists(pk)` for an item that did not exist. A cancelled
+transaction is treated as contention only when every cancellation reason is
+`ConditionalCheckFailed`; a request that loses re-reads, and normally then meets
+the cooldown. Any other reason (throttling, capacity, validation) is raised as a
+fault rather than retried. After five lost rounds issue raises
+`OtpStoreContention`, which the service answers with `503` and a short
+`Retry-After`, never with the "pending" signal for an SMS that was not sent. A
+verification that loses five rounds is not verified.
 
 `MemoryStore` performs each operation under its lock.
 
@@ -120,11 +129,13 @@ closed: no send, and a verification is not verified.
   `TransactWriteItems` needs no IAM action of its own; it is authorised by the
   per-item `PutItem` already granted on the table.
 - Every cap, cooldown and attempt limit holds across tasks, not just within one.
-- **Daily cap after deployment.** The new code neither reads nor migrates the
-  `OTPSEND#` rows. For the first 24 hours after deployment, each MSISDN's daily
-  count starts from zero, so it can receive up to the cap again on top of what it
-  received in the preceding 24 hours. The resend cooldown is unaffected because
-  it is read from the challenge. The old rows expire by TTL and need no cleanup.
+- **Daily cap across the deployment.** When an MSISDN's `OTPQUOTA#` item does
+  not exist yet, `issue_otp` seeds it from that MSISDN's `OTPSEND#` rows of the
+  last 24 hours, read with the old `Query` on the row timestamps, so the daily
+  count carries over the deployment instead of restarting at zero. The old rows
+  are never written again and expire by TTL within a day, after which the seed
+  finds nothing. The resend cooldown is unaffected because it is read from the
+  challenge.
 - The quota item keeps a list of send times, not a counter, so the 24-hour window
   stays rolling. The list is bounded by the cap.
 - moto applies requests without locking, so the concurrency tests serialise

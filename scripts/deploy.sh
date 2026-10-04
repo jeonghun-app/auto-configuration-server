@@ -261,9 +261,14 @@ random placeholder in the secret named by the SmppPasswordSecretArn output of
 ${APP_STACK}. Put it, then force a new deployment of the ECS service so the
 tasks read it. Write the file with printf, not an editor, so it has no trailing
 newline (one is stripped at startup, but an editor may add other bytes):
-  read -rs SMPP_PASSWORD    # not echoed, not in shell history
-  printf '%s' "\$SMPP_PASSWORD" > smpp-password.txt
-  aws secretsmanager put-secret-value --region ${REGION} --secret-id <arn> \\
-      --secret-string file://smpp-password.txt && rm smpp-password.txt
+  (
+    umask 077                 # the file is readable by you only
+    f=\$(mktemp)
+    trap 'rm -f "\$f"' EXIT    # removed even if the put fails
+    read -rs SMPP_PASSWORD    # not echoed, not in shell history
+    printf '%s' "\$SMPP_PASSWORD" > "\$f"
+    aws secretsmanager put-secret-value --region ${REGION} --secret-id <arn> \\
+        --secret-string "file://\$f"
+  )
 SMPP
 fi

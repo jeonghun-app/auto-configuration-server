@@ -35,9 +35,13 @@ VERSION_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
 
 # "## [1.3.0] — 2026-08-30". The date separator is an em dash in this repository;
 # an ASCII hyphen is accepted so a hand-edited heading does not silently vanish.
-_HEADING_RE = re.compile(r"^## \[(?P<name>[^\]]+)\](?:\s+[—–-]\s+\S.*)?\s*$")
-# Keep a Changelog ends with link reference definitions; they belong to no section.
-_LINK_DEF_RE = re.compile(r"^\[[^\]]+\]:\s+\S+")
+# As in CommonMark, an ATX heading may be indented by up to three spaces and its
+# marker may be followed by a tab.
+_H2_RE = re.compile(r"^ {0,3}##(?:[ \t].*)?$")
+_HEADING_RE = re.compile(r"^ {0,3}##[ \t]+\[(?P<name>[^\]]+)\](?:[ \t]+[—–-][ \t]+\S.*)?[ \t]*$")
+# A link reference definition. Keep a Changelog ends the file with a block of
+# them; inside a section they are part of the section.
+_LINK_DEF_RE = re.compile(r"^ {0,3}\[(?P<label>[^\]]+)\]:[ \t]+\S+")
 _INIT_VERSION_RE = re.compile(r'^__version__\s*=\s*"(?P<version>[^"]+)"', re.MULTILINE)
 # A fenced code block opens with three or more backticks or tildes, indented by at
 # most three spaces, and closes with at least as many of the same character. A
@@ -113,6 +117,32 @@ def _outside_fences(lines: list[str]) -> list[bool]:
     return result
 
 
+def _without_footer(section: list[str], structural: list[bool]) -> list[str]:
+    """Drop the file's closing block of link definitions from the last section.
+
+    That block holds every version's compare link, not this section's content.
+    A definition in it that this section actually uses is kept, so the
+    reference still resolves in the release notes.
+    """
+    cut = len(section)
+    while (
+        cut > 0
+        and structural[cut - 1]
+        and (not section[cut - 1].strip() or _LINK_DEF_RE.match(section[cut - 1]))
+    ):
+        cut -= 1
+    footer = [line for line in section[cut:] if line.strip()]
+    if not footer:
+        return section
+    body = "\n".join(section[:cut]).lower()
+    used = [
+        line
+        for line in footer
+        if (m := _LINK_DEF_RE.match(line)) is not None and f"[{m.group('label').lower()}]" in body
+    ]
+    return section[:cut] + ([""] + used if used else [])
+
+
 def extract_section(changelog_text: str, version: str) -> str:
     """Return the body of the ``## [version]`` section, without its heading."""
     lines = changelog_text.splitlines()
@@ -129,15 +159,18 @@ def extract_section(changelog_text: str, version: str) -> str:
     if start is None:
         raise ReleaseError(f"CHANGELOG.md has no '## [{version}]' section")
 
+    # Only the next level-two heading ends a section. A link definition does not:
+    # one in the middle of a section is followed by more of that section.
     end = len(lines)
     for index in range(start, len(lines)):
-        if not structural[index]:
-            continue
-        if lines[index].startswith("## ") or _LINK_DEF_RE.match(lines[index]):
+        if structural[index] and _H2_RE.match(lines[index]):
             end = index
             break
 
-    body = "\n".join(lines[start:end]).strip("\n")
+    section = lines[start:end]
+    if end == len(lines):
+        section = _without_footer(section, structural[start:end])
+    body = "\n".join(section).strip("\n")
     if not body.strip():
         raise ReleaseError(f"CHANGELOG.md section for {version} is empty")
     return body + "\n"
@@ -192,10 +225,18 @@ def channels(tag: str, existing: list[str]) -> tuple[bool, bool]:
 
 
 _ABSENT_RE = re.compile(r"not found|manifest unknown|name unknown", re.IGNORECASE)
+# Checked before _ABSENT_RE: "denied: token not found for scope" is a denial.
+_AUTH_FAILURE_RE = re.compile(r"denied|unauthori[sz]ed|forbidden|\b40[13]\b", re.IGNORECASE)
+# The denial GHCR gives for a package that has never been published.
 _DENIED_RE = re.compile(r"denied|403 forbidden", re.IGNORECASE)
+_UNAUTHENTICATED_RE = re.compile(r"unauthori[sz]ed|\b401\b", re.IGNORECASE)
+# The shell's "cannot execute" and "command not found": the lookup never ran.
+_NOT_RUN = frozenset({126, 127})
 
 
-def image_state(succeeded: bool, output: str, first_publish: bool) -> str:
+def image_state(
+    succeeded: bool, output: str, first_publish: bool, exit_code: int | None = None
+) -> str:
     """Classify an authenticated ``imagetools inspect`` of ``X.Y.Z``.
 
     Returns ``exists``, ``absent`` or ``absent-first-publish``; anything else is an
@@ -205,12 +246,18 @@ def image_state(succeeded: bool, output: str, first_publish: bool) -> str:
     an authenticated lookup of a package that does not exist yet like a denial;
     a maintainer opts into that with GHCR_FIRST_PUBLISH for that one run.
     """
+    if exit_code in _NOT_RUN:
+        raise ReleaseError(f"the image lookup did not run (exit {exit_code}): {output.strip()}")
     if succeeded:
         return "exists"
+    if _AUTH_FAILURE_RE.search(output):
+        if first_publish and _DENIED_RE.search(output) and not _UNAUTHENTICATED_RE.search(output):
+            return "absent-first-publish"
+        raise ReleaseError(
+            f"could not tell whether the image exists, the lookup was refused: {output.strip()}"
+        )
     if _ABSENT_RE.search(output):
         return "absent"
-    if first_publish and _DENIED_RE.search(output):
-        return "absent-first-publish"
     raise ReleaseError(f"could not tell whether the image exists: {output.strip()}")
 
 
@@ -277,7 +324,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"on {version}"
             )
         elif args.command == "image-state":
-            state = image_state(args.exit_code == 0, sys.stdin.read(), args.first_publish == "true")
+            state = image_state(
+                args.exit_code == 0, sys.stdin.read(), args.first_publish == "true", args.exit_code
+            )
             print(f"state={state}")
         elif args.command == "channels":
             latest, minor = channels(args.tag, sys.stdin.read().splitlines())

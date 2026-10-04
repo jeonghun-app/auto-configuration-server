@@ -450,11 +450,6 @@ def test_a_section_with_only_blank_lines_before_the_links_is_empty() -> None:
         rn.extract_section(text, "1.0.0")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA #13 defect: a reference-style link definition inside a section "
-    "silently truncates the release notes",
-)
 def test_a_link_definition_inside_a_section_does_not_truncate_it() -> None:
     text = (
         "## [2.0.0] — 2026-09-01\n\nSee [the spec][s].\n\n[s]: https://example.org\n\n"
@@ -463,11 +458,6 @@ def test_a_link_definition_inside_a_section_does_not_truncate_it() -> None:
     assert "More 2.0.0 content." in rn.extract_section(text, "2.0.0")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA #13 defect: a heading indented by 1-3 spaces is a heading in "
-    "Markdown but does not end the section, so the next one leaks in",
-)
 def test_an_indented_next_heading_does_not_leak_into_the_notes() -> None:
     text = "## [2.0.0] — 2026-09-01\n\nNew.\n\n ## [1.0.0] — 2026-08-30\n\nOld.\n"
     assert "Old." not in rn.extract_section(text, "2.0.0")
@@ -567,11 +557,6 @@ def test_other_auth_failures_are_errors_even_on_first_publish(output: str) -> No
             rn.image_state(False, output, first_publish=first)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="QA #13 defect: 'not found' is checked before 'denied', so a denial "
-    "whose text also says 'not found' is read as absent",
-)
 def test_a_denial_that_also_mentions_not_found_is_not_absent() -> None:
     with pytest.raises(rn.ReleaseError):
         rn.image_state(False, "denied: token not found for scope", first_publish=False)
@@ -598,3 +583,67 @@ def test_the_image_state_cli_only_accepts_the_exact_variable_values(first_publis
     )
     assert result.returncode != 0
     assert "absent-first-publish" not in result.stdout
+
+
+def test_a_tab_after_the_heading_marker_is_still_a_heading() -> None:
+    text = "##\t[2.0.0]\t—\t2026-09-01\n\nNew.\n\n##\t[1.0.0] — 2026-08-30\n\nOld.\n"
+    assert rn.extract_section(text, "2.0.0") == "New.\n"
+    assert rn.extract_section(text, "1.0.0") == "Old.\n"
+
+
+def test_an_indented_version_heading_is_found() -> None:
+    text = "   ## [2.0.0] — 2026-09-01\n\nNew.\n"
+    assert rn.extract_section(text, "2.0.0") == "New.\n"
+
+
+def test_a_level_three_heading_does_not_end_the_section() -> None:
+    text = "## [2.0.0] — 2026-09-01\n\n### Added\n\n- New.\n\n## [1.0.0]\n\nOld.\n"
+    assert rn.extract_section(text, "2.0.0") == "### Added\n\n- New.\n"
+
+
+def test_a_link_definition_that_ends_a_middle_section_stays_with_it() -> None:
+    text = (
+        "## [2.0.0] — 2026-09-01\n\nSee [the spec][s].\n\n[s]: https://example.org/s\n\n"
+        "## [1.0.0] — 2026-08-30\n\nOld.\n\n[2.0.0]: https://example.org/compare\n"
+    )
+    assert rn.extract_section(text, "2.0.0").endswith("[s]: https://example.org/s\n")
+    assert rn.extract_section(text, "1.0.0") == "Old.\n"
+
+
+def test_the_last_section_keeps_the_footer_definitions_it_uses() -> None:
+    text = (
+        "## [1.0.0] — 2026-08-30\n\nSee [the spec][S].\n\n"
+        "[Unreleased]: https://example.org/compare\n[s]: https://example.org/s\n"
+    )
+    body = rn.extract_section(text, "1.0.0")
+    assert body == "See [the spec][S].\n\n[s]: https://example.org/s\n"
+
+
+@pytest.mark.parametrize("code", [126, 127])
+def test_a_lookup_that_never_ran_is_not_absent(code: int) -> None:
+    # "docker: command not found" mentions "not found" but proves nothing.
+    with pytest.raises(rn.ReleaseError, match="did not run"):
+        rn.image_state(False, "bash: docker: command not found", True, exit_code=code)
+
+
+def test_an_unauthenticated_lookup_is_an_error_even_on_first_publish() -> None:
+    with pytest.raises(rn.ReleaseError):
+        rn.image_state(False, "denied: 401 Unauthorized", first_publish=True)
+
+
+def test_the_image_state_cli_refuses_a_command_not_found() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "release_notes.py"),
+            "image-state",
+            "--exit-code",
+            "127",
+        ],
+        input="bash: docker: command not found",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "did not run" in result.stderr

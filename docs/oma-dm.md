@@ -91,6 +91,10 @@ of a session. The response uses the request's WBXML version. Both encodings shar
 the XML parser, authentication and session state machine, and a session can change
 encoding between requests.
 
+WBXML encoding omits whitespace-only text between elements, including XML
+indentation. Leaf values retain their text, even when it consists only of
+whitespace. XML responses keep their existing formatting.
+
 The standard-library codec in `src/acs/protocol/omadm/wbxml.py` supports:
 
 - WBXML 1.2 and 1.3 (version bytes `0x02` and `0x03`), UTF-8 charset `106`;

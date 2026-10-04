@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import AsyncIterator
 from copy import deepcopy
 from xml.etree import ElementTree
@@ -235,26 +236,49 @@ async def test_server_wbxml_response_matches_independent_header_status_and_metin
     )
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/vnd.syncml.dm+wbxml"
-    assert response.content.startswith(
-        version + b"\xa4\x01\x6a\x00\x6d\x03\n  \x00\x6c\x03\n    \x00\x71\x031.2\x00\x01"
-    )
-    assert b"\x5a\x03\n      \x00\x00\x01\x4c\x0316384\x00\x01" in response.content
+    assert response.content.startswith(version + b"\xa4\x01\x6a\x00\x6d\x6c\x71\x031.2\x00\x01")
+    assert b"\x5a\x00\x01\x4c\x0316384\x00\x01\x01\x01" in response.content
     assert (
-        b"\x00\x00\x6b\x03\n    \x00\x69\x03\n      \x00"
-        b"\x4b\x031\x00\x01\x03\n      \x00"
-        b"\x5c\x031\x00\x01\x03\n      \x00"
-        b"\x4c\x030\x00\x01\x03\n      \x00"
-        b"\x4a\x03SyncHdr\x00\x01"
+        b"\x00\x00\x6b\x69\x4b\x031\x00\x01\x5c\x031\x00\x01"
+        b"\x4c\x030\x00\x01\x4a\x03SyncHdr\x00\x01"
     ) in response.content
     assert (
-        b"\x00\x01\x47\x03b64\x00\x01"
-        b"\x03\n          \x00\x53\x03syncml:auth-basic\x00\x01"
-        b"\x03\n          \x00\x50\x03bm9uY2U=\x00\x01"
+        b"\x49\x5a\x00\x01\x47\x03b64\x00\x01"
+        b"\x53\x03syncml:auth-basic\x00\x01\x50\x03bm9uY2U=\x00\x01\x01\x01"
     ) in response.content
-    assert b"\x00\x00\x4f\x03407\x00\x01" in response.content
-    assert response.content.endswith(
-        b"\x03\n    \x00\x01\x03\n    \x00\x12\x03\n  \x00\x01\x03\n\x00\x01"
-    )
+    assert response.content.endswith(b"\x00\x00\x4f\x03407\x00\x01\x01\x12\x01\x01")
+    assert re.search(rb"\x03[ \t\r\n]+\x00", response.content) is None
+
+
+@pytest.mark.spec
+async def test_server_commands_match_independent_compact_wbxml_tokens(
+    dm_client: httpx.AsyncClient,
+) -> None:
+    responses: list[bytes] = []
+    for msg_id, body in ((1, PACKAGE_1_BODY), (2, ""), (3, "")):
+        response = await dm_client.post(
+            "/dm",
+            content=wbxml.encode(package(msg_id, body, cred=basic_cred())),
+            headers={"Content-Type": "application/vnd.syncml.dm+wbxml"},
+        )
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/vnd.syncml.dm+wbxml"
+        assert re.search(rb"\x03[ \t\r\n]+\x00", response.content) is None
+        responses.append(response.content)
+
+    # Public SyncML page 0 tokens with content: Get 53, Add 45, Replace 60,
+    # Item 54, Target 6E, LocURI 57. Expected bytes do not use the codec tables.
+    assert (b"\x53\x4b\x034\x00\x01\x54\x6e\x57\x03./DevInfo/DevId\x00\x01\x01\x01") in responses[0]
+    assert (
+        b"\x45\x4b\x032\x00\x01\x54\x6e\x57\x03./3GPP_IMS\x00\x01\x01"
+        b"\x5a\x00\x01\x47\x03node\x00\x01\x53\x03node\x00\x01\x01\x01"
+    ) in responses[1]
+    assert (
+        b"\x00\x00\x60\x4b\x033\x00\x01\x54\x6e\x57"
+        b"\x03./3GPP_IMS/1/Private_User_Identity\x00\x01\x01"
+        b"\x5a\x00\x01\x47\x03chr\x00\x01"
+    ) in responses[1]
+    assert responses[2].endswith(b"\x12\x01\x01")
 
 
 @pytest.mark.spec

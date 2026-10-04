@@ -39,6 +39,32 @@ def test_a_small_syncml_message_encodes_to_the_fixed_wbxml_vector() -> None:
 
 
 @pytest.mark.spec
+@pytest.mark.parametrize("use_string_table", [False, True])
+def test_indentation_is_omitted_from_the_fixed_wbxml_vector(use_string_table: bool) -> None:
+    xml = SMALL_XML.replace(b"><", b">\n    <")
+    assert wbxml.encode(xml, use_string_table=use_string_table) == SMALL_WBXML
+
+
+@pytest.mark.spec
+@pytest.mark.parametrize("use_string_table", [False, True])
+@pytest.mark.parametrize("opaque", [False, True])
+@pytest.mark.parametrize("value", [" \t\r\n ", " value \t ", "\u00a0"])
+def test_removing_indentation_preserves_whitespace_in_leaf_values(
+    use_string_table: bool, opaque: bool, value: str
+) -> None:
+    text = value.replace("\r", "&#13;")
+    xml = (
+        f"<SyncML>\n  <SyncBody>\n    <Data>{text}</Data>\n"
+        f"    <Data>{text}</Data>\n    <Final/>\n  </SyncBody>\n</SyncML>"
+    ).encode()
+    wire = wbxml.encode(xml, use_string_table=use_string_table, opaque=opaque)
+    root = ElementTree.fromstring(wbxml.decode(wire))
+    assert [element.text for element in root.iter("{SYNCML:SYNCML1.2}Data")] == [value, value]
+    assert all(element.text is None for element in root.iter() if len(element))
+    assert all(element.tail is None for element in root.iter())
+
+
+@pytest.mark.spec
 @pytest.mark.parametrize("version", [wbxml.VERSION_12, wbxml.VERSION_13])
 @pytest.mark.parametrize(
     ("namespace", "public_id"),

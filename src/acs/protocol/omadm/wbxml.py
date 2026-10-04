@@ -363,6 +363,14 @@ def encode(
     if namespace and namespace != syncml_namespace:
         raise WbxmlError("XML namespace does not match WBXML public identifier")
 
+    # SyncML has no mixed content: indentation between elements is formatting,
+    # while whitespace in leaf values is data and must survive encoding.
+    for element in root.iter():
+        if len(element) and element.text and element.text.isspace():
+            element.text = None
+        if element.tail and element.tail.isspace():
+            element.tail = None
+
     table = bytearray()
     offsets: dict[str, int] = {}
     if isinstance(public_id, str):

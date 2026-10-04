@@ -242,5 +242,5 @@ def checkbox_field(name: str, label: str, checked: bool) -> str:
     return (
         f'<label for="{field_id}">'
         f'<input id="{field_id}" name="{esc(name)}" type="checkbox" value="1"'
-        f'{" checked" if checked else ""}> {esc(label)}</label>'
+        f"{' checked' if checked else ''}> {esc(label)}</label>"
     )

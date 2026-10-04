@@ -77,7 +77,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install cfn-lint
-        run: pip install cfn-lint==1.22.3
+        run: pip install cfn-lint==1.55.1
 
       - name: Validate CloudFormation
         run: cfn-lint infra/ecr.yaml infra/app.yaml

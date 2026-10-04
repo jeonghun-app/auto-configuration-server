@@ -115,8 +115,7 @@ def verify_nonce(
 def challenge_header(realm: str, nonce: str, qop: str = "auth") -> str:
     """Build the ``WWW-Authenticate`` value for a GBA bootstrap challenge."""
     return (
-        f'Digest realm="{realm}", nonce="{nonce}", qop="{qop}", '
-        'algorithm=AKAv1-MD5, opaque="gba"'
+        f'Digest realm="{realm}", nonce="{nonce}", qop="{qop}", algorithm=AKAv1-MD5, opaque="gba"'
     )
 
 

@@ -208,7 +208,7 @@ def run_session(dm: DmService, dm_store: MemoryStore) -> dict[str, str]:
     uris = [item.uri for command in gets for item in command.items]
 
     results_items = "".join(
-        "<Item><Source><LocURI>{uri}</LocURI></Source>" "<Data>{value}</Data></Item>".format(
+        "<Item><Source><LocURI>{uri}</LocURI></Source><Data>{value}</Data></Item>".format(
             uri=uri, value=DEVICE_VALUES.get(uri, f"v-{uri.rsplit('/', 1)[-1]}")
         )
         for uri in uris

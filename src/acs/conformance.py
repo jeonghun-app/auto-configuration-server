@@ -108,8 +108,7 @@ class Requirement:
         """The only sentence this project is entitled to write about the row."""
         if self.status == "implemented":
             return (
-                f"Implemented; {self.verification.replace('-', ' ')}. "
-                "No certification is claimed."
+                f"Implemented; {self.verification.replace('-', ' ')}. No certification is claimed."
             )
         if self.status == "partial":
             return f"Partially implemented. {self.gap}"
@@ -130,7 +129,7 @@ class RequirementSet:
     requirements: tuple[Requirement, ...]
 
     def counts(self) -> dict[str, int]:
-        out = {status: 0 for status in sorted(_STATUSES)}
+        out = dict.fromkeys(sorted(_STATUSES), 0)
         for requirement in self.requirements:
             out[requirement.status] += 1
         return out

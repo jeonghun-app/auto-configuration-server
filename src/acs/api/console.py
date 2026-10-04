@@ -818,8 +818,7 @@ def device_list(request: Request, q: str = Query(default="")) -> Response:
     for device in sorted(devices, key=lambda d: d.last_seen_at, reverse=True):
         subscriber = app_state.store.get_subscriber(device.imsi) if device.imsi else None
         number = (
-            f'<a href="/admin/ui/subscribers/{quote(subscriber.imsi)}">'
-            f"{esc(subscriber.msisdn)}</a>"
+            f'<a href="/admin/ui/subscribers/{quote(subscriber.imsi)}">{esc(subscriber.msisdn)}</a>'
             if subscriber
             else "—"
         )
@@ -875,7 +874,7 @@ def device_detail(request: Request, device_id: str) -> Response:
     tree = get_tree()
 
     number = (
-        f'<a href="/admin/ui/subscribers/{quote(subscriber.imsi)}">' f"{esc(subscriber.msisdn)}</a>"
+        f'<a href="/admin/ui/subscribers/{quote(subscriber.imsi)}">{esc(subscriber.msisdn)}</a>'
         if subscriber
         else "— not linked to a subscriber"
     )

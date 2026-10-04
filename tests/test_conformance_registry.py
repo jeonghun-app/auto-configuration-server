@@ -264,19 +264,14 @@ def test_claim_wording_is_specific_per_status() -> None:
 # ------------------------------------------------------------ loader rules
 def write_registry(tmp_path: pathlib.Path, body: str) -> pathlib.Path:
     (tmp_path / "x.yaml").write_text(
-        "meta:\n"
-        "  id: x\n"
-        "  title: X\n"
-        "  spec: X spec\n"
-        "  role: server\n"
-        "requirements:\n" + body,
+        "meta:\n  id: x\n  title: X\n  spec: X spec\n  role: server\nrequirements:\n" + body,
         encoding="utf-8",
     )
     return tmp_path
 
 
 EVIDENCE_TEST = (
-    "tests/test_conformance_registry.py::" "test_registry_loads_both_specification_families"
+    "tests/test_conformance_registry.py::test_registry_loads_both_specification_families"
 )
 
 BASE_ROW = f"""  - id: X-ONE

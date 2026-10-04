@@ -25,7 +25,7 @@ import dataclasses
 import enum
 
 
-class VersAction(str, enum.Enum):
+class VersAction(enum.StrEnum):
     """What the client is being told to do."""
 
     APPLY = "apply"

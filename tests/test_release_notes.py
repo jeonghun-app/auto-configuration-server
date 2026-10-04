@@ -263,3 +263,86 @@ def test_the_channels_cli_prints_github_outputs() -> None:
         check=True,
     )
     assert result.stdout == "latest=false\nminor=false\n"
+
+
+def test_backticks_in_an_info_string_are_inline_code_not_a_fence() -> None:
+    text = (
+        "## [2.0.0] — 2026-09-01\n\n"
+        "- A wrapped list item whose next line starts with code:\n"
+        "  ```old_option``` is now deprecated.\n"
+        "```old_option``` again, unindented.\n\n"
+        "## [1.0.0] — 2026-08-30\n\nFirst release.\n"
+    )
+    body = rn.extract_section(text, "2.0.0")
+    assert body.endswith("```old_option``` again, unindented.\n")
+    assert "First release" not in body
+    assert rn.extract_section(text, "1.0.0") == "First release.\n"
+
+
+def test_a_tilde_fence_info_string_may_contain_backticks() -> None:
+    text = "## [1.0.0] — 2026-01-01\n\n~~~ `x`\n## inside\n~~~\n\nAfter.\n\n## [0.9.0]\n\nOld.\n"
+    body = rn.extract_section(text, "1.0.0")
+    assert "## inside" in body
+    assert body.rstrip().endswith("After.")
+
+
+NOT_FOUND = "ERROR: ghcr.io/o/r:1.4.0: not found"
+DENIED = "ERROR: failed to authorize: ... 403 Forbidden"
+
+
+@pytest.mark.parametrize(
+    ("succeeded", "output", "first", "state"),
+    [
+        (True, '{"digest": "sha256:abc"}', False, "exists"),
+        (True, '{"digest": "sha256:abc"}', True, "exists"),
+        (False, NOT_FOUND, False, "absent"),
+        (False, "manifest unknown", False, "absent"),
+        (False, "name unknown: repository name not known to registry", False, "absent"),
+        (False, DENIED, True, "absent-first-publish"),
+        (False, "denied: requested access to the resource is denied", True, "absent-first-publish"),
+    ],
+)
+def test_an_image_lookup_is_classified(
+    succeeded: bool, output: str, first: bool, state: str
+) -> None:
+    assert rn.image_state(succeeded, output, first) == state
+
+
+@pytest.mark.parametrize(
+    "output",
+    [DENIED, "denied: requested access to the resource is denied", "502 Bad Gateway", ""],
+)
+def test_a_denial_or_an_error_is_never_read_as_absent(output: str) -> None:
+    # A lookup refused while the push is allowed would overwrite an existing X.Y.Z.
+    with pytest.raises(rn.ReleaseError, match="could not tell"):
+        rn.image_state(False, output, first_publish=False)
+
+
+def test_first_publish_does_not_excuse_a_registry_error() -> None:
+    with pytest.raises(rn.ReleaseError):
+        rn.image_state(False, "502 Bad Gateway", first_publish=True)
+
+
+@pytest.mark.parametrize(
+    ("args", "stdin", "code", "stdout"),
+    [
+        (["--exit-code", "1"], NOT_FOUND, 0, "state=absent\n"),
+        (["--exit-code", "1", "--first-publish", ""], DENIED, 1, ""),
+        (
+            ["--exit-code", "1", "--first-publish", "true"],
+            DENIED,
+            0,
+            "state=absent-first-publish\n",
+        ),
+        (["--exit-code", "0"], '{"digest": "sha256:abc"}', 0, "state=exists\n"),
+    ],
+)
+def test_the_image_state_cli(args: list[str], stdin: str, code: int, stdout: str) -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "release_notes.py"), "image-state", *args],
+        input=stdin,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (result.returncode, result.stdout) == (code, stdout)

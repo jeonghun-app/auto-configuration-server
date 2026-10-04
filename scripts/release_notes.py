@@ -9,6 +9,7 @@ mean the same thing in both places.
     python scripts/release_notes.py notes 1.3.0 [--image ghcr.io/owner/repo]
         [--digest sha256:...] [--repo-url https://github.com/owner/repo]
     git tag -l | python scripts/release_notes.py channels v1.3.0
+    python scripts/release_notes.py image-state --exit-code N [--first-publish true] < out
 
 ``verify`` fails unless the tag is ``vMAJOR.MINOR.PATCH``, equals the version in
 ``pyproject.toml`` and ``src/acs/__init__.py``, and ``CHANGELOG.md`` has a non-empty
@@ -39,8 +40,10 @@ _HEADING_RE = re.compile(r"^## \[(?P<name>[^\]]+)\](?:\s+[—–-]\s+\S.*)?\s*$"
 _LINK_DEF_RE = re.compile(r"^\[[^\]]+\]:\s+\S+")
 _INIT_VERSION_RE = re.compile(r'^__version__\s*=\s*"(?P<version>[^"]+)"', re.MULTILINE)
 # A fenced code block opens with three or more backticks or tildes, indented by at
-# most three spaces, and closes with at least as many of the same character.
-_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
+# most three spaces, and closes with at least as many of the same character. A
+# backtick opener's info string cannot contain a backtick (CommonMark), so
+# "```old_option``` is deprecated" is inline code, not a fence.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 # A relative Markdown link: ](path) where path has no scheme and is not an anchor.
 _RELATIVE_LINK_RE = re.compile(r"\]\((?![a-zA-Z][a-zA-Z0-9+.-]*:|#|/)(?P<path>[^)\s]+)\)")
 
@@ -86,7 +89,9 @@ def _outside_fences(lines: list[str]) -> list[bool]:
     for number, line in enumerate(lines, start=1):
         match = _FENCE_RE.match(line)
         if open_fence is None:
-            if match is not None:
+            if match is not None and not (
+                match.group("fence")[0] == "`" and "`" in match.group("info")
+            ):
                 open_fence = match.group("fence")
                 opened_at = number
                 result.append(False)
@@ -186,6 +191,29 @@ def channels(tag: str, existing: list[str]) -> tuple[bool, bool]:
     return current == newest, current == newest_in_line
 
 
+_ABSENT_RE = re.compile(r"not found|manifest unknown|name unknown", re.IGNORECASE)
+_DENIED_RE = re.compile(r"denied|403 forbidden", re.IGNORECASE)
+
+
+def image_state(succeeded: bool, output: str, first_publish: bool) -> str:
+    """Classify an authenticated ``imagetools inspect`` of ``X.Y.Z``.
+
+    Returns ``exists``, ``absent`` or ``absent-first-publish``; anything else is an
+    error. Only an explicit not-found counts as absent. A denial does not, because
+    a lookup that is refused while the later push is allowed would overwrite an
+    existing image. The one exception is the very first publish, when GHCR answers
+    an authenticated lookup of a package that does not exist yet like a denial;
+    a maintainer opts into that with GHCR_FIRST_PUBLISH for that one run.
+    """
+    if succeeded:
+        return "exists"
+    if _ABSENT_RE.search(output):
+        return "absent"
+    if first_publish and _DENIED_RE.search(output):
+        return "absent-first-publish"
+    raise ReleaseError(f"could not tell whether the image exists: {output.strip()}")
+
+
 def verify(tag: str, root: pathlib.Path) -> str:
     version = version_from_tag(tag)
     declared = project_version((root / "pyproject.toml").read_text(encoding="utf-8"))
@@ -234,6 +262,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p_channels.add_argument("tag", help="for example v1.3.0")
 
+    p_state = sub.add_parser(
+        "image-state", help="classify an imagetools inspect result read from stdin"
+    )
+    p_state.add_argument("--exit-code", type=int, required=True)
+    p_state.add_argument("--first-publish", choices=["true", "false", ""], default="")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
@@ -242,6 +276,9 @@ def main(argv: list[str] | None = None) -> int:
                 f"{args.tag}: pyproject.toml, src/acs/__init__.py and CHANGELOG.md agree "
                 f"on {version}"
             )
+        elif args.command == "image-state":
+            state = image_state(args.exit_code == 0, sys.stdin.read(), args.first_publish == "true")
+            print(f"state={state}")
         elif args.command == "channels":
             latest, minor = channels(args.tag, sys.stdin.read().splitlines())
             print(f"latest={str(latest).lower()}")

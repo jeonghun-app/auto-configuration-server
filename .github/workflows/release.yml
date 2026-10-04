@@ -114,27 +114,37 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # X.Y.Z is immutable: a deployment may already pin it. If it exists, this
-      # run publishes nothing and only the Release notes are (re)written.
+      # run publishes nothing and only the Release notes are (re)written. The
+      # lookup runs after the login above, so a denial is a real denial and not
+      # "absent" (see image_state in scripts/release_notes.py).
       - name: Refuse to overwrite an existing X.Y.Z
         id: existing
         env:
           REF: ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}
+          FIRST_PUBLISH: ${{ vars.GHCR_FIRST_PUBLISH }}
         run: |
           set -euo pipefail
-          if out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)"; then
-            digest="$(jq -r .digest <<<"$out")"
-            echo "::warning::$REF already exists ($digest); not rebuilding or pushing"
-            echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          # A missing tag answers "not found"; a package that has never been
-          # published answers like an access denial. Either way nothing can be
-          # overwritten: the push below needs the same access. Anything else (a
-          # registry or network error) must not be read as absence.
-          elif grep -qiE 'not found|name unknown|manifest unknown|denied|403 forbidden' <<<"$out"; then
-            echo "$REF does not exist yet: $out"
-          else
-            echo "::error::could not tell whether $REF exists: $out"
-            exit 1
-          fi
+          rc=0
+          out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)" || rc=$?
+          state="$(python scripts/release_notes.py image-state --exit-code "$rc" \
+            --first-publish "$FIRST_PUBLISH" <<<"$out" | sed -n 's/^state=//p')"
+          case "$state" in
+            exists)
+              digest="$(jq -r .digest <<<"$out")"
+              echo "::warning::$REF already exists ($digest); not rebuilding or pushing"
+              echo "digest=$digest" >> "$GITHUB_OUTPUT"
+              ;;
+            absent)
+              echo "$REF does not exist yet: $out"
+              ;;
+            absent-first-publish)
+              echo "::warning::lookup of $REF was denied and GHCR_FIRST_PUBLISH is true;" \
+                "treating it as the package's first publish. Delete the variable after this release."
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
 
       - id: meta
         if: steps.existing.outputs.digest == ''

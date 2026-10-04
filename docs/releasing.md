@@ -69,6 +69,9 @@ git tag -a vX.Y.Z -m "vX.Y.Z" origin/main
 git push origin vX.Y.Z
 ```
 
+For the very first release published to GHCR, set `GHCR_FIRST_PUBLISH` before
+pushing the tag; see [The first publish to GHCR](#the-first-publish-to-ghcr).
+
 ### 3. What the workflow does
 
 | Job | Permissions | Does |
@@ -105,6 +108,29 @@ If `ghcr.io/jeonghun-app/auto-configuration-server:X.Y.Z` already exists, the
 the `release` job still runs, so re-running a release only rewrites its notes from
 the CHANGELOG. To ship different contents, release `X.Y.(Z+1)`.
 
+The lookup is made after logging in to GHCR, and only an explicit `not found`,
+`manifest unknown` or `name unknown` counts as "does not exist". Anything else,
+including `denied` and `403`, fails the job: a lookup that is refused while the
+push is allowed would overwrite an existing image.
+
+#### The first publish to GHCR
+
+Before the package exists, GHCR may answer that authenticated lookup with a
+denial rather than `not found`. For the first release only, allow that one case
+with a repository variable, and delete it as soon as the release is out:
+
+```bash
+gh variable set GHCR_FIRST_PUBLISH --body true     # before pushing the first tag
+git push origin vX.Y.Z
+gh run watch <run-id> --exit-status               # the image job logs a warning
+gh variable delete GHCR_FIRST_PUBLISH              # immediately afterwards
+```
+
+While the variable is set, a denial on any release is read as "absent", which
+is exactly the overwrite the check exists to prevent. If the first release's
+log shows `does not exist yet` rather than the warning, GHCR answered `not found`
+and the variable was not needed.
+
 Every action is pinned to a full commit SHA. Dependabot (`github-actions`, monthly)
 proposes updates to those pins.
 
@@ -129,9 +155,10 @@ docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.versi
   ghcr.io/jeonghun-app/auto-configuration-server:X.Y.Z
 ```
 
-On the first release, check the package's visibility under the repository's
-**Packages**. If it is not public, `docker pull` works only for the maintainers;
-change it in the package settings.
+After the first release, delete `GHCR_FIRST_PUBLISH` (see
+[The first publish to GHCR](#the-first-publish-to-ghcr)) and check the package's
+visibility under the repository's **Packages**. If it is not public, `docker pull`
+works only for the maintainers; change it in the package settings.
 
 ## When the workflow fails
 

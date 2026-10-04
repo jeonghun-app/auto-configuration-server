@@ -1,9 +1,9 @@
 -r requirements.txt
 httpx==0.28.1
-pytest==8.3.4
-pytest-cov==6.0.0
-moto[dynamodb]==5.0.26
-ruff==0.8.6
-mypy==1.14.1
-cfn-lint==1.22.3
-types-PyYAML==6.0.12.20241230
+pytest==9.1.1
+pytest-cov==7.1.0
+moto[dynamodb]==5.2.3
+ruff==0.16.4
+mypy==2.3.1
+cfn-lint==1.55.1
+types-PyYAML==6.0.12.20260815

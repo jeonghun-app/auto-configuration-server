@@ -55,6 +55,29 @@ def test_create_subscriber(client: TestClient, admin_headers: dict[str, str]) ->
     assert response.json()["rcs_profile"] == "UP_1.0"
 
 
+def test_a_json_body_without_a_json_content_type_is_refused(
+    client: TestClient, admin_headers: dict[str, str]
+) -> None:
+    # FastAPI 0.132+ checks the Content-Type of JSON bodies. The admin API keeps
+    # that strict behaviour: a body is only parsed as JSON when the client says it
+    # is JSON, so a missing or wrong header is refused rather than guessed at.
+    imsi = "001010000000002"
+    body = b'{"msisdn": "821087654321"}'
+    for headers in (admin_headers, {**admin_headers, "Content-Type": "text/plain"}):
+        refused = client.put(f"/admin/subscribers/{imsi}", headers=headers, content=body)
+        assert refused.status_code == 422
+        assert refused.json()["detail"][0]["loc"] == ["body"]
+    assert client.get(f"/admin/subscribers/{imsi}", headers=admin_headers).status_code == 404
+
+    accepted = client.put(
+        f"/admin/subscribers/{imsi}",
+        headers={**admin_headers, "Content-Type": "application/json"},
+        content=body,
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["msisdn"] == "+821087654321"
+
+
 def test_create_subscriber_validates_the_imsi(
     client: TestClient, admin_headers: dict[str, str]
 ) -> None:

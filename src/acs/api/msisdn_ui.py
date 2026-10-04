@@ -210,7 +210,6 @@ def msisdn_verify(
         return _html(_page("Verified", body))
 
     body = (
-        '<p class="error">That code was not accepted.</p>'
-        '<p><a href="/msisdn">Start again</a></p>'
+        '<p class="error">That code was not accepted.</p><p><a href="/msisdn">Start again</a></p>'
     )
     return _html(_page("Enter your code", body), status_code=400)

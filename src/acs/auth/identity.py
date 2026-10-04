@@ -25,7 +25,7 @@ import enum
 from acs.domain.models import Subscriber
 
 
-class IdentityMethod(str, enum.Enum):
+class IdentityMethod(enum.StrEnum):
     TOKEN = "token"
     ENRICHMENT = "enrichment"
     GBA = "gba"
@@ -33,7 +33,7 @@ class IdentityMethod(str, enum.Enum):
     NONE = "none"
 
 
-class IdentityDecision(str, enum.Enum):
+class IdentityDecision(enum.StrEnum):
     AUTHENTICATED = "authenticated"
     """The subscriber is proven; serve the configuration."""
 

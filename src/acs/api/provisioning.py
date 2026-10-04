@@ -6,6 +6,8 @@ Registered on every path in ``ACS_CONFIG_PATHS`` (default ``/``, ``/config`` and
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Request, Response
 
 from acs.api.deps import AppState
@@ -62,7 +64,11 @@ async def handle_configuration_request(request: Request) -> Response:
     if query.unknown:
         log.info("unknown configuration parameters", extra={"names": list(query.unknown)})
 
-    outcome = app_state.provisioning.handle(
+    # The flow is synchronous and blocks on the store and on SMS delivery; an SMPP
+    # session can take seconds. Off the event loop, one slow SMSC does not stall
+    # every other request on the task. to_thread keeps the request id context.
+    outcome = await asyncio.to_thread(
+        app_state.provisioning.handle,
         query=query,
         headers=dict(request.headers),
         peer=request.client.host if request.client else None,

@@ -151,7 +151,12 @@ def msisdn_submit(
                     sender_id=app_state.settings.sms_sender_id,
                 )
             )
-        except (otp_mod.SendBlocked, UnsupportedDelivery) as exc:
+        except otp_mod.SendBlocked as exc:
+            log.info("msisdn flow otp not sent", extra={"reason": str(exc)})
+        except UnsupportedDelivery as exc:
+            # As in the RCC.14 flow: a challenge whose code never left must not
+            # hold the resend cooldown or wait to be guessed.
+            app_state.store.delete_otp(normalised)
             log.info("msisdn flow otp not sent", extra={"reason": str(exc)})
 
     new_csrf = secrets.token_urlsafe(24)

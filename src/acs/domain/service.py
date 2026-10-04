@@ -10,6 +10,7 @@ import dataclasses
 import secrets
 import time
 from collections.abc import Mapping
+from typing import Final
 
 from acs.auth import gba as gba_mod
 from acs.auth import otp as otp_mod
@@ -30,10 +31,16 @@ from acs.observability import get_logger
 from acs.protocol import vers as vers_mod
 from acs.protocol.omacp import builder, writer
 from acs.protocol.request import ConfigQuery
-from acs.sms.base import SmsRequest, SmsSender, UnsupportedDelivery
+from acs.sms.base import SmsDeliveryFailed, SmsRequest, SmsSender, UnsupportedDelivery
 from acs.store.base import Store
 
 log = get_logger(__name__)
+
+# An SMSC outage or a refused submit is usually transient, so the client should
+# retry soon. A provider that cannot send the requested mode at all will not
+# change within the hour.
+OTP_DELIVERY_FAILED_RETRY_AFTER_SECONDS: Final = 60
+OTP_DELIVERY_UNSUPPORTED_RETRY_AFTER_SECONDS: Final = 3600
 
 
 @dataclasses.dataclass(slots=True)
@@ -282,13 +289,29 @@ class ProvisioningService:
                     sender_id=self._settings.sms_sender_id,
                 )
             )
+        except SmsDeliveryFailed as exc:
+            # Do not leave the client waiting for a message that was never sent.
+            self._store.delete_otp(msisdn)
+            log.error("otp delivery failed", extra={"error": str(exc), "msisdn": msisdn})
+            return ProvisioningOutcome(
+                status_code=503,
+                headers={
+                    **_no_store_headers(),
+                    "Retry-After": str(OTP_DELIVERY_FAILED_RETRY_AFTER_SECONDS),
+                },
+                metric="OtpDeliveryFailed",
+                detail="otp_delivery_failed",
+            )
         except UnsupportedDelivery as exc:
             # Do not leave the client waiting for a message that cannot be sent.
             self._store.delete_otp(msisdn)
             log.error("otp delivery unsupported", extra={"error": str(exc), "msisdn": msisdn})
             return ProvisioningOutcome(
                 status_code=503,
-                headers={**_no_store_headers(), "Retry-After": "3600"},
+                headers={
+                    **_no_store_headers(),
+                    "Retry-After": str(OTP_DELIVERY_UNSUPPORTED_RETRY_AFTER_SECONDS),
+                },
                 metric="OtpDeliveryUnsupported",
                 detail="port_addressed_sms_unsupported",
             )

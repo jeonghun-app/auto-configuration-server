@@ -13,7 +13,13 @@ from acs.domain.models import Subscriber
 from acs.domain.service import ProvisioningService
 from acs.protocol.omacp import writer
 from acs.protocol.request import ConfigQuery
-from acs.sms.base import MockSmsSender, SmsRequest, SmsResult, UnsupportedDelivery
+from acs.sms.base import (
+    MockSmsSender,
+    SmsDeliveryFailed,
+    SmsRequest,
+    SmsResult,
+    UnsupportedDelivery,
+)
 from acs.store.memory import MemoryStore
 
 
@@ -217,7 +223,30 @@ def test_port_addressed_otp_is_refused_rather_than_downgraded(
     outcome = service.handle(query(sms_port=37273))
     assert outcome.status_code == 503
     assert outcome.headers["Retry-After"] == "3600"
+    assert (outcome.metric, outcome.detail) == (
+        "OtpDeliveryUnsupported",
+        "port_addressed_sms_unsupported",
+    )
     # The challenge must not be left dangling for a message that cannot arrive.
+    assert seeded_store.get_otp(TEST_MSISDN) is None
+
+
+class FailingSender:
+    name = "failing"
+
+    def send(self, request: SmsRequest) -> SmsResult:
+        raise SmsDeliveryFailed("SMSC did not answer")
+
+
+@pytest.mark.parametrize("sms_port", [None, 37273], ids=["text", "port-addressed"])
+def test_a_failed_delivery_answers_503_with_a_short_retry_and_deletes_the_challenge(
+    settings: Settings, seeded_store: MemoryStore, sms_port: int | None
+) -> None:
+    service = ProvisioningService(settings, seeded_store, FailingSender())
+    outcome = service.handle(query(sms_port=sms_port))
+    assert outcome.status_code == 503
+    assert outcome.headers["Retry-After"] == "60"
+    assert (outcome.metric, outcome.detail) == ("OtpDeliveryFailed", "otp_delivery_failed")
     assert seeded_store.get_otp(TEST_MSISDN) is None
 
 

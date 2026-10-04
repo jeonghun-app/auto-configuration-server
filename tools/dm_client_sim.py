@@ -22,13 +22,19 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import pathlib
 import sys
 from typing import Any
 from xml.etree import ElementTree
 
 import httpx
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "src"))
+
+from acs.protocol.omadm import wbxml as dm_wbxml  # noqa: E402
+
 DM_CONTENT_TYPE = "application/vnd.syncml.dm+xml"
+DM_WBXML_CONTENT_TYPE = "application/vnd.syncml.dm+wbxml"
 SYNCML_NS = "SYNCML:SYNCML1.2"
 METINF_NS = "syncml:metinf"
 
@@ -74,6 +80,7 @@ class DmClientSimulator:
         sw_version: str = "SIM-1.0",
         timeout: float = 10.0,
         verify_tls: bool = True,
+        wbxml: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.dm_path = dm_path
@@ -81,6 +88,7 @@ class DmClientSimulator:
         self.imei = imei
         self.password = password
         self.auth = auth
+        self.wbxml = wbxml
         self.manufacturer = manufacturer
         self.model = model
         self.sw_version = sw_version
@@ -189,15 +197,22 @@ class DmClientSimulator:
         return ElementTree.tostring(root, encoding="utf-8", xml_declaration=True)
 
     def post(self, payload: bytes) -> httpx.Response:
-        return self.client.post(
+        content_type = DM_WBXML_CONTENT_TYPE if self.wbxml else DM_CONTENT_TYPE
+        response = self.client.post(
             f"{self.base_url}{self.dm_path}",
-            content=payload,
-            headers={"Content-Type": DM_CONTENT_TYPE, "Accept": DM_CONTENT_TYPE},
+            content=dm_wbxml.encode(payload) if self.wbxml else payload,
+            headers={"Content-Type": content_type, "Accept": content_type},
         )
+        if self.wbxml:
+            media_type = response.headers.get("content-type", "").partition(";")[0].strip().lower()
+            if media_type != DM_WBXML_CONTENT_TYPE:
+                raise dm_wbxml.WbxmlError("server did not return the requested WBXML content type")
+        return response
 
     # ---------------------------------------------------------------- parsing
-    @staticmethod
-    def parse(payload: bytes) -> dict[str, Any]:
+    def parse(self, payload: bytes) -> dict[str, Any]:
+        if self.wbxml:
+            payload = dm_wbxml.decode(payload)
         root = ElementTree.fromstring(payload)  # noqa: S314
         out: dict[str, Any] = {
             "statuses": [],
@@ -336,6 +351,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--imei", default="356938035643809")
     parser.add_argument("--password", required=True, help="DM password from the w7 characteristic")
     parser.add_argument("--auth", choices=["basic", "md5", "none"], default="basic")
+    parser.add_argument("--wbxml", action="store_true", help="send and receive WBXML SyncML")
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args(argv)
 
@@ -348,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         password=args.password,
         auth=args.auth,
         verify_tls=not args.insecure,
+        wbxml=args.wbxml,
     )
     print(f"OMA-DM endpoint under test: {args.base_url}{args.dm_path}")
     try:
@@ -355,6 +372,9 @@ def main(argv: list[str] | None = None) -> int:
     except httpx.HTTPError as exc:
         print(f"  ERROR transport failure: {exc}")
         return 2
+    except dm_wbxml.WbxmlError as exc:
+        print(f"  ERROR WBXML failure: {exc}")
+        return 1
     finally:
         sim.close()
     return 0 if checker.summary() else 1

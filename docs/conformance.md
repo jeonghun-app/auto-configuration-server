@@ -48,9 +48,9 @@ It is generated and gated, not written:
 
 | Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
 | --- | --- | --- | --- | --- | --- |
-| OMA Device Management 1.2 (server role) | 58 | 37 | 5 | 16 | 10 |
+| OMA Device Management 1.2 (server role) | 58 | 37 | 6 | 15 | 10 |
 | GSMA RCC.14 Service Provider Device Configuration (ACS role) | 55 | 43 | 10 | 2 | 7 |
-| **Total** | **113** | **80** | **15** | **18** | **17** |
+| **Total** | **113** | **80** | **16** | **17** | **17** |
 
 **Overall: not fully conformant.** 17 requirements this project classifies as mandatory are not fully implemented, and 3 further specification families could not be assessed at all because the documents are not held. Both are listed below, and `scripts/gen_conformance.py --strict` exits non-zero for each reason separately.
 
@@ -184,10 +184,10 @@ These were asked for and **cannot be assessed here, because the document is not 
 
 ### `OMADM-ENC-WBXML` — Accept the WBXML SyncML encoding
 
-* Status: **not-implemented** (behaviour-tested)
+* Status: **partial** (behaviour-tested)
 * Reference: OMA-TS-DM_RepPro, WBXML encoding
-* Gap: Only the XML encoding is implemented. A WBXML request is refused with HTTP 415 rather than answered with XML the client cannot decode.
-* Impact: A WBXML-only DM client cannot be managed at all. This is the largest remaining interoperability gap on the DM plane.
+* Gap: This is the text-valued SyncML / MetInf subset, not general WBXML. Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY, processing instructions and other code pages are refused with HTTP 400.
+* Impact: WBXML clients using this subset can complete DM sessions. Clients needing arbitrary binary management objects or the unsupported WBXML constructs cannot use those features. No real-handset interoperability is claimed.
 
 ### `RCC14-REQ-PARAMETERS` — Parse the documented query parameter set with types and length limits
 
@@ -300,9 +300,9 @@ These were asked for and **cannot be assessed here, because the document is not 
 | `OMADM-MO-DMACC` | Expose the DM account as a manageable object | optional | no | code-review-only | — | The DM account is bootstrapped one way, through the OMA-CP w7 characteristic. There is no DMAcc management object, so the account cannot be inspected or rotated over DM. |
 | `OMADM-MO-EXTENSIBLE` | Add a management object without changing server code | optional | yes | behaviour-tested | `test_a_new_management_object_needs_no_code` | This is the extensibility requirement the project was asked for: a new managed service is a YAML file. |
 | `OMADM-ENC-XML` | Accept the XML SyncML encoding | mandatory | yes | behaviour-tested | `test_dm_endpoint_answers_over_http` | — |
-| `OMADM-ENC-WBXML` | Accept the WBXML SyncML encoding | mandatory | no | behaviour-tested | `test_wbxml_is_refused_explicitly` | Only the XML encoding is implemented. A WBXML request is refused with HTTP 415 rather than answered with XML the client cannot decode. |
+| `OMADM-ENC-WBXML` | Accept the WBXML SyncML encoding | mandatory | partial | behaviour-tested | `test_a_fixed_wbxml_vector_decodes_to_the_expected_syncml_message`<br>`test_both_wbxml_versions_and_syncml_public_identifiers_round_trip`<br>`test_malformed_or_unsupported_wbxml_is_rejected`<br>`test_indentation_is_omitted_from_the_fixed_wbxml_vector`<br>`test_removing_indentation_preserves_whitespace_in_leaf_values`<br>`test_wbxml_requests_preserve_state_through_a_complete_dm_session`<br>`test_wbxml_md5_credentials_are_checked_against_the_stored_nonce`<br>`test_six_thousand_replace_commands_receive_the_same_response_in_xml_and_wbxml`<br>`test_wbxml_encoding_failure_preserves_session_and_device_state`<br>`test_server_wbxml_response_matches_independent_header_status_and_metinf_bytes`<br>`test_server_commands_match_independent_compact_wbxml_tokens`<br>`test_the_wbxml_cli_drives_an_authenticated_session` | This is the text-valued SyncML / MetInf subset, not general WBXML. Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY, processing instructions and other code pages are refused with HTTP 400. |
 | `OMADM-SEC-XXE` | Parse device-supplied SyncML without resolving external entities | mandatory | yes | behaviour-tested | `test_external_entities_are_not_expanded` | — |
-| `OMADM-SEC-BODY-LIMIT` | Bound the size of an accepted DM payload | mandatory | yes | behaviour-tested | `test_oversized_payload_is_refused`<br>`test_dm_endpoint_refuses_a_huge_body` | — |
+| `OMADM-SEC-BODY-LIMIT` | Bound the size of an accepted DM payload | mandatory | yes | behaviour-tested | `test_oversized_payload_is_refused`<br>`test_dm_endpoint_refuses_a_huge_body`<br>`test_repeated_string_table_references_cannot_exhaust_memory`<br>`test_wbxml_nesting_is_bounded_in_both_directions`<br>`test_the_dm_route_stops_reading_as_soon_as_the_body_limit_is_exceeded` | — |
 | `OMADM-SEC-SESSION-STORE` | Keep session state where every server task can see it | mandatory | yes | behaviour-tested | `test_dm_session_round_trip`<br>`test_expired_dm_session_is_treated_as_absent` | A DM session spans several HTTP requests, so in-process state would break the moment the service runs more than one task. |
 
 ## GSMA RCC.14 Service Provider Device Configuration (ACS role)

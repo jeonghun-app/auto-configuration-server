@@ -257,7 +257,8 @@ def test_nothing_claims_interoperability_testing(
 def test_claim_wording_is_specific_per_status() -> None:
     by_id = conformance.by_id()
     assert "No certification is claimed" in by_id["OMADM-CMD-GET"].claim_wording()
-    assert by_id["OMADM-ENC-WBXML"].claim_wording().startswith("Not implemented.")
+    assert by_id["OMADM-CMD-DELETE"].claim_wording().startswith("Not implemented.")
+    assert by_id["OMADM-ENC-WBXML"].claim_wording().startswith("Partially implemented.")
     assert by_id["OMADM-HDR-MSGID"].claim_wording().startswith("Partially implemented.")
 
 

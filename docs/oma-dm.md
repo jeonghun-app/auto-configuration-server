@@ -83,6 +83,58 @@ the session instead of retrying with credentials.
 An unknown username and a wrong password are answered identically, so the DM
 endpoint cannot be used to enumerate subscribers.
 
+## WBXML encoding
+
+`POST /dm` accepts `application/vnd.syncml.dm+wbxml` as well as XML. A WBXML
+request receives WBXML, including authentication challenges and the last package
+of a session. The response uses the request's WBXML version. Both encodings share
+the XML parser, authentication and session state machine, and a session can change
+encoding between requests.
+
+WBXML encoding omits whitespace-only text between elements, including XML
+indentation. Leaf values retain their text, even when it consists only of
+whitespace. XML responses keep their existing formatting.
+
+The standard-library codec in `src/acs/protocol/omadm/wbxml.py` supports:
+
+- WBXML 1.2 and 1.3 (version bytes `0x02` and `0x03`), UTF-8 charset `106`;
+- SyncML 1.1 public ID `0x0FD3` and SyncML 1.2 public ID `0x1201`, or their
+  `-//SYNCML//DTD SyncML 1.1//EN` / `-//SYNCML//DTD SyncML 1.2//EN` string-table IDs;
+- SyncML code page 0 and MetInf code page 1, `SWITCH_PAGE`, content bits and `END`;
+- inline strings (`STR_I`), string-table references (`STR_T`, including suffix
+  offsets), and UTF-8 text inside `OPAQUE`.
+
+The public token tables are identified in the module's source comment. Accepting
+a SyncML 1.1 public identifier does not add DM 1.1 protocol negotiation: server
+packages still carry `VerDTD` 1.2 and `VerProto` DM/1.2, as they do over XML.
+
+This is a codec for the existing text-valued DM messages. Binary `OPAQUE` values
+that are not representable as UTF-8 XML text, attributes, literal tag names,
+extension tokens, `ENTITY`, processing instructions and other code pages are
+rejected with HTTP `400`. It does not implement arbitrary binary management
+objects or claim support for every WBXML construct.
+
+Malformed input also receives `400`: truncated or overflowing integers, strings
+without terminators, invalid table offsets, unknown tags, unsupported headers,
+incomplete elements and excessive nesting. Limits are explicit codec constants:
+five bytes per unsigned 32-bit integer, 64 element levels, 16,384 elements,
+512 KiB of WBXML input and 2 MiB of decoded XML. The decoded limit also bounds
+expansion from repeated string-table references. At the HTTP boundary, bodies
+are read with a 512 KiB cap and the existing `ACS_DM_MAX_MSG_SIZE * 4` cap still
+applies (64 KiB by default); exceeding either body cap returns `413`.
+
+Server responses have separate encoding limits: 128 element levels, 131,072
+elements, 32 MiB of source XML and 16 MiB of WBXML. These allow a compact request
+with many commands to expand into acknowledgements and catalogue commands.
+Session and device changes are saved only after the response is encoded. An
+encoding failure returns HTTP `500` with the `DmEncodingError` metric and leaves
+the stored state unchanged, allowing the client to retry. These resource limits
+do not implement response splitting to satisfy a client's `MaxMsgSize`.
+
+Basic and nonce-based MD5 credentials are checked after decoding, exactly as for
+XML. The current DM authentication implementation does not calculate a MAC or
+HMAC over the HTTP body in either encoding.
+
 ## The management object tree
 
 Definitions live in `src/acs/catalog/omadm/`, loaded and validated at startup. A
@@ -194,10 +246,16 @@ python tools/dm_client_sim.py \
 configuration `Replace`, the VoLTE nodes, and clean session termination.
 `scripts/verify_stack.py` does the whole chain including harvesting the password.
 
+Add `--wbxml` to the simulator command to run the same session using WBXML.
+`--auth md5 --wbxml` also exercises the nonce challenge. Fixed byte vectors,
+malformed payloads and resource limits are tested in `tests/test_dm_wbxml.py`;
+HTTP sessions and authentication in `tests/test_dm_wbxml_session.py`; the CLI
+in `tests/test_dm_wbxml_simulator.py` and the live-server simulator suite.
+
 ## What is missing
 
-- **WBXML** (`application/vnd.syncml.dm+wbxml`) — refused with `415` rather than
-  answered with XML the client cannot decode.
+- **General WBXML support** — the text-valued SyncML / MetInf subset above is
+  supported; arbitrary binary objects and other code pages are not.
 - **Server-initiated sessions** — needs a WAP Push or trigger SMS through an
   operator SMSC.
 - **Large object handling** — `./DevDetail/LrgObj` is read but chunked transfer is

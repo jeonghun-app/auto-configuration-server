@@ -17,8 +17,8 @@ Parsing is namespace-tolerant on purpose: real DM clients disagree about whether
 ``syncml:metinf`` elements carry a prefix, and rejecting a handset over a
 namespace declaration would be a self-inflicted interoperability failure.
 
-WBXML (the binary SyncML encoding, ``application/vnd.syncml.dm+wbxml``) is not
-implemented; see :data:`SUPPORTED_CONTENT_TYPES`.
+The session layer converts WBXML through the same XML parser and builder;
+see :data:`SUPPORTED_CONTENT_TYPES`.
 """
 
 from __future__ import annotations
@@ -37,7 +37,12 @@ METINF_NS: Final = "syncml:metinf"
 
 CONTENT_TYPE_XML: Final = "application/vnd.syncml.dm+xml"
 CONTENT_TYPE_WBXML: Final = "application/vnd.syncml.dm+wbxml"
-SUPPORTED_CONTENT_TYPES: Final[tuple[str, ...]] = (CONTENT_TYPE_XML, "text/xml", "application/xml")
+SUPPORTED_CONTENT_TYPES: Final[tuple[str, ...]] = (
+    CONTENT_TYPE_XML,
+    CONTENT_TYPE_WBXML,
+    "text/xml",
+    "application/xml",
+)
 
 # ---- OMA-DM alert codes ---------------------------------------------------
 ALERT_SERVER_INITIATED_MGMT: Final = "1200"
@@ -190,6 +195,15 @@ class SyncMlParseError(ValueError):
     """The payload is not a usable SyncML DM message."""
 
 
+def _integer(value: str) -> int:
+    if not value.isdigit():
+        return 0
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise SyncMlParseError("invalid SyncML integer") from exc
+
+
 # -------------------------------------------------------------------- parser
 def parse(payload: bytes) -> SyncMlMessage:
     """Parse a SyncML DM package.
@@ -247,13 +261,15 @@ def _parse_header(element: etree._Element) -> SyncHdr:
 
     max_msg_size = 0
     if meta is not None:
-        raw = _deep_text(meta, "MaxMsgSize")
-        if raw.isdigit():
-            max_msg_size = int(raw)
+        max_msg_size = _integer(_deep_text(meta, "MaxMsgSize"))
+
+    msg_id = _text(_find(element, "MsgID"))
+    # MsgID stays a string on the wire, but the session converts it to an int.
+    _integer(msg_id)
 
     return SyncHdr(
         session_id=_text(_find(element, "SessionID")),
-        msg_id=_text(_find(element, "MsgID")),
+        msg_id=msg_id,
         target=_deep_text(target, "LocURI") if target is not None else "",
         source=_deep_text(source, "LocURI") if source is not None else "",
         source_name=_deep_text(source, "LocName") if source is not None else "",
@@ -268,7 +284,7 @@ def _parse_command(name: str, element: etree._Element) -> Command:
     cmd_id_raw = _text(_find(element, "CmdID"))
     command = Command(
         name=name,
-        cmd_id=int(cmd_id_raw) if cmd_id_raw.isdigit() else 0,
+        cmd_id=_integer(cmd_id_raw),
         cmd_ref=_text(_find(element, "CmdRef")),
         msg_ref=_text(_find(element, "MsgRef")),
         cmd=_text(_find(element, "Cmd")),

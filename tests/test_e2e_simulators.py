@@ -72,6 +72,13 @@ class LiveServer:
         return f"http://127.0.0.1:{self.port}"
 
     def start(self) -> None:
+        try:
+            self._wait_until_serving()
+        except BaseException:
+            self.stop()
+            raise
+
+    def _wait_until_serving(self) -> None:
         self._thread.start()
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:
@@ -84,12 +91,12 @@ class LiveServer:
                     return
                 raise RuntimeError(f"server started but /healthz answered {response.status_code}")
             time.sleep(0.05)
-        self.stop()
         raise RuntimeError("server did not start within 20s")
 
     def stop(self) -> None:
         self._server.should_exit = True
-        self._thread.join(timeout=10)
+        if self._thread.is_alive():
+            self._thread.join(timeout=10)
         self._socket.close()
 
 

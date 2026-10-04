@@ -5,6 +5,272 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-10-04
+
+Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM
+sessions and port-addressed OTP over an operator SMSC — and the OTP limits now
+hold under concurrency. The dependencies are brought up to date, including a
+python-multipart release that fixes seven published advisories, and releases are
+now published from a tag, with a container image on GHCR.
+
+### Added
+
+- **WBXML SyncML DM sessions.** `POST /dm` accepts
+  `application/vnd.syncml.dm+wbxml` and answers in the encoding and WBXML version
+  the request arrived in, including authentication challenges. Some production DM
+  clients speak only WBXML, and until now they got `415`. A bounded,
+  standard-library WBXML 1.2/1.3 codec converts to and from the XML the session
+  code already handles, so both encodings share one parser, one authentication
+  path and one state machine, and a session may switch encoding between requests.
+  The codec is deliberately narrow: the SyncML and MetInf code pages, UTF-8,
+  inline and string-table strings, and `OPAQUE` only when it holds UTF-8 text.
+  Attributes, literal tags, extensions, `ENTITY`, processing instructions, other
+  code pages and binary `OPAQUE` are refused with `400` rather than guessed at.
+  Every length, depth and element count is a named constant. A request that
+  breaks a decoding limit is a `4xx`, never a `500`; a server response that
+  breaks the encoder's own, larger limits is a `500` with `DmEncodingError`, and
+  the session and device state are left as they were. See [docs/oma-dm.md](docs/oma-dm.md#wbxml-encoding).
+- The WBXML response is compact: XML indentation is not carried into it as inline
+  strings, which made up 63% of an init response and sit where the DTD allows only
+  elements. Leaf values keep their whitespace.
+- `tools/dm_client_sim.py --wbxml` runs the same DM session over WBXML.
+- **Port-addressed (silent) OTP over SMPP 3.4.** `ACS_SMS_PROVIDER=smpp` sends the
+  OTP through an operator SMSC: one `bind_transceiver` / `submit_sm` / `unbind`
+  session per message, not pooled, because OTPs are rare and must not depend on a
+  connection surviving across tasks. With `SMS_port` the message is 8-bit data
+  with UDHI set and the 16-bit application port header ahead of the OTP template;
+  a text OTP uses the GSM default alphabet only when that is byte-for-byte safe,
+  otherwise UCS-2. A message longer than one SMS is refused, not concatenated.
+  Once `submit_sm` is accepted the send counts as successful even if the closing
+  `unbind` fails, because the SMSC already holds the message; the failure is
+  logged as a warning. It
+  has been exercised **only against an in-process fake SMSC**, never an operator
+  SMSC or a handset, so `RCC14-AUTH-OTP-PORT` is `partial`, not implemented. The
+  AWS providers still refuse `SMS_port` rather than downgrade it.
+- `ACS_SMPP_*` settings: host, port (1–65535), `system_id`, password (held as a
+  secret, never logged), `system_type`, source address and TON/NPI, destination
+  TON/NPI, TLS (**on by default**, because SMPP sends the password in clear), a CA
+  bundle for an operator private CA, and a per-response timeout above 0 and at most
+  60 seconds — capped because the request waits on it. Selecting `smpp` without a
+  host, `system_id` and password refuses to start in staging and production, and
+  a password longer than 8 characters or outside printable ASCII refuses to start
+  in any environment; a trailing newline from a secret file is stripped. See
+  [.env.example](.env.example).
+- CloudFormation `SmsProvider=smpp` with `SmppHost`, `SmppPort`, `SmppSystemId`,
+  `SmppTls` and `SmppSmscCidr`. A template rule refuses `smpp` without a host,
+  `system_id` and SMSC range; the tasks gain one egress rule, to that range on the
+  SMPP port only; the password is a stack secret (`SmppPasswordSecretArn` output)
+  injected through ECS Secrets. `scripts/deploy.sh` gains `--smpp-host`,
+  `--smpp-port`, `--smpp-system-id`, `--smpp-cidr` and `--smpp-tls`, never
+  takes the password as a flag, and prints how to store it through a private
+  temporary file that is removed even if the put fails.
+- Metrics `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`.
+- **Releases from a tag.** Pushing `vX.Y.Z` runs `make check`, refuses a tag that
+  differs from the declared version, has no CHANGELOG section or is not on `main`,
+  then publishes `ghcr.io/jeonghun-app/auto-configuration-server` for
+  `linux/amd64` and `linux/arm64` with an SBOM and provenance, and creates the
+  GitHub Release from this file. `X.Y.Z` is never overwritten; `X.Y` and `latest`
+  only move forward. Locally, `scripts/release_notes.py verify` runs the tag
+  checks only: the `vX.Y.Z` form, both version declarations and a non-empty
+  CHANGELOG section. Being on `main` and `make check` are separate steps of the
+  workflow.
+  Procedure and rollback: [docs/releasing.md](docs/releasing.md).
+- A code of conduct ([CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md), Contributor
+  Covenant 2.1), and issue forms in place of blank issues. The bug form warns
+  against pasting real IMSI, IMEI, MSISDN, OTPs and tokens, which a blank issue
+  invites; the specification-correction form asks for the edition and clause and
+  a confirmation that no licensed text was pasted. Security reports are routed to
+  private advisories, and [SECURITY.md](SECURITY.md) says where that form is.
+
+### Changed
+
+- **The admin JSON API requires a JSON `Content-Type`.** FastAPI 0.132 and later
+  check it: `PUT /admin/subscribers/{imsi}` with a JSON body and no
+  `Content-Type` now answers `422` and stores nothing, where 1.3.0 answered
+  `200`. A body sent as `text/plain` was already refused with `422` in 1.3.0. Kept on purpose — the API parses a body as JSON only when
+  the client says it is JSON — and pinned by a test.
+- **`;` no longer separates URL-encoded form fields.** python-multipart 0.0.30 and
+  later split only on `&`, which closes a smuggling and a quadratic-parsing
+  advisory (see Security). This affects every form body: the console login, the
+  MSISDN entry and OTP forms, and the `POST` variant of the configuration
+  request. Every client in the repository already uses `&`.
+- An SMS delivery failure answers `503` with `detail=otp_delivery_failed`,
+  `Retry-After: 60` and the metric `OtpDeliveryFailed`, and deletes the challenge.
+  A provider that cannot send the requested mode keeps `OtpDeliveryUnsupported`
+  with `Retry-After: 3600`: an SMSC outage is usually transient, and a one-hour
+  wait would be the wrong instruction to the client.
+- The configuration flow runs in a worker thread, so a slow SMSC session (up to its
+  timeout) no longer stalls every other request on the task.
+- The `/dm` body is read as a stream and cut off at 512 KiB, so an oversized
+  request is refused before it is buffered.
+- OTP send history moves from one DynamoDB row per send (`OTPSEND#<msisdn>`) to
+  one versioned item (`OTPQUOTA#<msisdn>`/`SENDS`), and each challenge carries a
+  random `challenge_id`. The new item is seeded from the last 24 hours of
+  `OTPSEND#` rows, so daily counts carry over the upgrade, and 1.4.x keeps writing
+  the legacy row as well so that 1.3 tasks still count its sends; removing that
+  dual write is tracked in #28. No migration step is needed, and no new IAM action.
+  See the amendment to [ADR 0002](docs/adr/0002-datastore.md).
+- `IdentityMethod`, `IdentityDecision` and `VersAction` derive from
+  `enum.StrEnum`. Every rendered value already used `.value`, so no log line,
+  metric dimension or document changes.
+- Dependencies: fastapi 0.115.6 → 0.141.1 (Starlette 0.41.3 → 1.7.0), uvicorn
+  0.34.0 → 0.54.0, pydantic 2.10.4 → 2.13.5, pydantic-settings 2.7.1 → 2.15.0,
+  lxml 5.3.0 → 6.1.3, boto3 1.35.90 → 1.43.106, PyYAML 6.0.2 → 6.0.3,
+  python-multipart 0.0.20 → 0.0.32. Development tools: pytest 9, pytest-cov 7,
+  ruff 0.16, mypy 2.3, cfn-lint 1.57, moto 5.2. CI actions: checkout,
+  setup-python and upload-artifact 7, each still pinned to a commit SHA.
+- A configuration refused at startup still stops the container with exit status
+  1, as in 1.3.0, measured in the container. `create_app` raises while uvicorn
+  loads it, so uvicorn 0.50's exit status 3, which it uses for its own startup
+  failures such as a port that cannot be bound, does not apply.
+- The base image digest moves to the current Python 3.11 patch build (3.11.17).
+  The interpreter stays 3.11, and Dependabot no longer proposes a new Python minor
+  as an image bump: the interpreter moves with `requires-python`, CI, mypy, ruff
+  and the Makefile together, or not at all.
+
+### Fixed
+
+- **Concurrent OTP requests could exceed the daily cap, and one code could verify
+  twice.** The OTP flow read the challenge and the send count, decided, and wrote
+  back in separate calls. That was reachable across ECS tasks sharing the table:
+  eight concurrent requests under a daily cap of one sent five to eight SMS. The
+  store now offers two atomic operations and nothing else changes a challenge —
+  `issue_otp` (a conditional `TransactWriteItems` on DynamoDB) and `replace_otp`
+  (a compare-and-swap; consuming a code is a conditional delete) — so each
+  concurrent wrong guess spends exactly one attempt, and a code verifies once.
+  After five lost rounds an issue answers `503` with `Retry-After: 5` and the
+  metric `OtpStoreContention`, never the "pending" signal for an SMS that was not
+  sent; a verification that loses five rounds is not verified. DynamoDB throttling,
+  capacity and validation errors are now raised, where every cancelled transaction
+  used to be retried as contention and could end as `200` pending with no SMS sent.
+- **AWS SMS provider failures answered `500` and left the challenge.** An error
+  from AWS End User Messaging or SNS was not handled, so the client got a `500`
+  and the challenge stayed, holding the resend cooldown for a code that was never
+  sent. It now takes the same path as an SMSC failure: `503`,
+  `detail=otp_delivery_failed`, `Retry-After: 60`, `OtpDeliveryFailed`, and the
+  challenge deleted (#35). The log keeps the AWS error code and request id, not
+  the AWS message, which can echo the destination number.
+- A failed SMS send deleted whichever challenge the MSISDN held by then. The send
+  can take seconds, so a late failure could delete a newer challenge whose code
+  was already on its way. Only the challenge issued for that send is deleted now.
+- The MSISDN entry web flow left the challenge in place when delivery failed,
+  holding the resend cooldown for a code that never left. It is deleted, as in the
+  RCC.14 flow, and the page is unchanged, so it still does not reveal which
+  numbers exist.
+- A DM credential containing non-ASCII characters raised during comparison instead
+  of failing as a mismatch.
+
+### Security
+
+- **python-multipart 0.0.20 → 0.0.32.** 0.0.20 is affected by seven published
+  advisories, all fixed by 0.0.31: GHSA-wp53-j4wj-2cfg (CVE-2026-24486, high,
+  arbitrary file write in a non-default configuration), GHSA-mj87-hwqh-73pj
+  (CVE-2026-40347, medium, DoS through a large preamble or epilogue),
+  GHSA-pp6c-gr5w-3c5g (CVE-2026-42561, high, DoS through unbounded part headers),
+  GHSA-5rvq-cxj2-64vf (CVE-2026-53539, high, quadratic query-string parsing with
+  `;`), GHSA-6jv3-5f52-599m (CVE-2026-53538, low, `;` field-separator smuggling),
+  GHSA-vffw-93wf-4j4q (CVE-2026-53537, low, RFC 2231 parameter smuggling) and
+  GHSA-v9pg-7xvm-68hf (CVE-2026-53540, low, negative `Content-Length` buffering).
+  Starlette parses every form body with it, so the URL-encoded CPU DoS was
+  reachable without authentication.
+- **lxml 6.1.3.** 6.1.3 fixes external parameter entities being parsed by
+  default when `resolve_entities="internal"` (LP#2165901), and 6.1 carries the
+  upstream XXE fixes for `iterparse`. Neither path was reachable here: both lxml
+  parsers set `resolve_entities=False`, `load_dtd` and `no_network` explicitly,
+  and a new test puts an entity reference in element text to show it stays
+  unexpanded. Taken anyway, so a later change to a parser option cannot reopen
+  them.
+- The SMSC's `message_id` is untrusted and could carry the MSISDN or the OTP. It
+  is logged and audited only as a keyed digest (`smpp-<16 hex>`) whose key exists
+  only in the process. SMPP errors name a `command_status` only from a fixed table
+  of SMPP 3.4 codes, and never quote sequence numbers, lengths or command ids,
+  which an SMSC carrying the OTP chooses freely.
+- With `SmsProvider=smpp` the tasks no longer hold `sms-voice:SendTextMessage` and
+  `sns:Publish`, since they never call AWS SMS.
+- The WBXML codec bounds integers, nesting (64 levels), elements (16,384), input
+  (512 KiB) and decoded size (2 MiB), the last of which also bounds expansion
+  through repeated string-table references.
+- FastAPI is held below 0.142. 0.142 adds OpenTelemetry instrumentation that, once
+  an SDK is installed, records `url.query` on every span with only cloud signature
+  keys redacted — IMSI, IMEI, MSISDN, OTP and the provisioning token would leave
+  the process. It is taken when `create_app` switches that telemetry off with a
+  test that proves it (#29).
+- Header-enrichment trust is pinned behind uvicorn's proxy-header rewrite: two
+  contract tests run the app inside uvicorn's own `ProxyHeadersMiddleware` with the
+  image's settings, and fail if trust is decided on the caller-controlled
+  left-most `X-Forwarded-For` entry instead of the one the load balancer appended.
+
+### Upgrade notes
+
+This is a minor release although two kinds of request are now refused, because
+only a request that never followed the documented contract — a JSON body without a
+JSON `Content-Type`, or `;` as a form-field separator — is refused, and every
+client in the repository already follows it; see
+[docs/releasing.md](docs/releasing.md#versioning).
+
+- **Admin API clients must send `Content-Type: application/json`** with JSON
+  bodies, or get `422`. The console is unaffected.
+- **Form bodies must separate fields with `&`.** A `;` is now part of the
+  preceding field's value, so `vers=0;IMSI=…` arrives as one field. Check any
+  operator tooling that posts to the console or to the configuration endpoint.
+- **New metrics** in the `RcsAcs` namespace, with no alarm in the stack: add one
+  if you want to be paged. `OtpDeliveryFailed` is an SMS provider or SMSC failure;
+  `OtpStoreContention` is OTP issue losing five conditional-write rounds, and
+  sustained values mean one MSISDN is being hammered or the table is unhealthy;
+  `DmEncodingError` is the server failing to encode its own WBXML response, a
+  server fault that leaves the session and device state unchanged. See
+  [docs/runbook.md](docs/runbook.md).
+- **Port-addressed OTP over SMPP is opt-in** and is not proven against a real
+  SMSC. To enable it, deploy with `--sms-provider smpp --smpp-host <host>
+  --smpp-system-id <id> --smpp-cidr <range>` (and `--smpp-port`, `--smpp-tls
+  false` only on a private link). The stack creates the password secret with a
+  random 8-character placeholder, so every OTP answers `503` until you put the
+  operator-issued password into the secret named by `SmppPasswordSecretArn` and
+  force a new deployment of the service; secrets are read at task start. Rotate it
+  the same way. A value longer than 8 characters or outside printable ASCII stops
+  the new tasks at startup, and the deployment circuit breaker rolls back to the
+  running ones. Test with the operator's SMSC and a real client before relying on
+  it: the user data after the port header is the configured OTP template, and the
+  content an RCS client expects there is not taken from a pinned RCC.14 edition.
+- **`scripts/deploy.sh` passes the new `Smpp*` parameters on every run**, like the
+  existing ones, so a later deploy without the `--smpp-*` flags resets them to
+  their defaults. Repeat them on every deploy and rollback of an SMPP stack.
+- **The OTP limits are atomic only once every task runs 1.4.0.** During a rolling
+  deployment the risk is the 1.3 tasks' own non-atomic check: concurrent requests
+  that 1.3 tasks serve can still exceed the cap. The dual-written `OTPSEND#` rows
+  let 1.3 tasks see the 1.4 tasks' sends, and 1.4 always counts the `OTPSEND#`
+  rows of the last 24 hours together with its quota item, so once the rollout
+  completes, sends that 1.3 tasks made during it are counted too (#35). Rolling
+  back to 1.3.0 keeps the daily counts for the same reason; 1.3 ignores the new
+  `challenge_id` and `OTPQUOTA#` item.
+- **The container image is now on GHCR**:
+  `docker pull ghcr.io/jeonghun-app/auto-configuration-server:1.4.0` (pin the
+  digest printed in the release notes). `scripts/deploy.sh` still builds the
+  checked-out tree and pushes to its own ECR repository; it does not pull from GHCR.
+- No stored record needs migrating and no `ACS_*` setting changes meaning. The
+  supported Python is still 3.11.
+
+### Deliberately not done
+
+- **No SMS concatenation.** An OTP never needs more than one SMS, and a split
+  port-addressed message is one more thing a client can reassemble wrongly.
+- **No pooled SMPP bind.** OTPs are rare, and delivery must not depend on a
+  long-lived connection surviving across tasks; a short session per OTP does not.
+- **No general WBXML.** Binary `OPAQUE` and the other constructs above are
+  refused, because a guessed decoding would hand the session code a value the
+  device never sent.
+- **No Python 3.14 base image** (Dependabot #2 declined). Production would run an
+  interpreter CI never tests.
+
+### Known limitations
+
+- **DM responses are not split to fit the client's `MaxMsgSize`**, in either
+  encoding (#20). This predates 1.4.0; the WBXML encoder's output limits are
+  resource bounds, not message splitting.
+- Port-addressed OTP over SMPP has not met a real SMSC or handset, and
+  server-initiated DM sessions are still not possible: the SMPP client sends only
+  the OTP, not a DM notification. See [docs/limitations.md](docs/limitations.md).
+
 ## [1.3.0] — 2026-08-30
 
 ### Added
@@ -220,7 +486,8 @@ server-initiated DM sessions, and 91 of 116 OMA-CP parameters not yet
 cross-checked against a licensed specification edition. See
 [docs/limitations.md](docs/limitations.md).
 
-[Unreleased]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.3.0...HEAD
+[Unreleased]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/jeonghun-app/auto-configuration-server/compare/v1.0.0...v1.1.0

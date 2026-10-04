@@ -78,7 +78,9 @@ subscriber's IMS credentials. It does not.
 | Known subscriber, not entitled, or IMEI not allowlisted | `403`, empty body |
 | Identity unresolved | `511`, empty body |
 | GBA enabled and identity unresolved | `401` with `WWW-Authenticate: Digest … algorithm=AKAv1-MD5` |
-| Port-addressed OTP requested but unsupported | `503` with `Retry-After`, challenge deleted |
+| Port-addressed OTP requested but the provider cannot send it (`eum`, `sns`) | `503` with `Retry-After: 3600`, challenge deleted |
+| OTP send failed at the SMS provider or SMSC | `503` with `Retry-After: 60`, challenge deleted |
+| Concurrent OTP issue for one MSISDN kept conflicting in the store | `503` with `Retry-After: 5`, no SMS sent |
 | Malformed request | `400` (configurable to `403`) |
 | Unhandled error | `500`, `{"error":"internal_error"}`, no stack trace |
 

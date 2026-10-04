@@ -62,7 +62,9 @@ Common outcomes and their meaning:
 | `Rejected403` | Not entitled, or IMEI not allowlisted | Check `entitled` and `imei_allowlist` |
 | `OtpSent` | Challenge issued | The client should repeat the request with `OTP=` |
 | `OtpRateLimited` | Cooldown or daily cap | Wait, or raise the cap |
-| `OtpDeliveryUnsupported` | Client asked for port-addressed SMS | Expected on AWS; see limitations |
+| `OtpDeliveryUnsupported` | Client asked for port-addressed SMS and the provider is `eum` or `sns` | Expected on AWS; needs `smpp`, see limitations |
+| `OtpDeliveryFailed` | The SMS provider or SMSC refused or failed the send; `503`, `Retry-After: 60`, challenge deleted | See [OTP delivery failing](#otp-delivery-failing) |
+| `OtpStoreContention` | OTP issue lost five conditional-write rounds; `503`, `Retry-After: 5` | Occasional: concurrent requests for one MSISDN. Sustained: see [OTP delivery failing](#otp-delivery-failing) |
 | `ConfigUnchanged` | Client already current | Not a fault |
 | `ConfigDisabled` | A forced negative `VERS` was served | Deliberate; check `forced_vers` |
 
@@ -123,6 +125,96 @@ watch the `OtpSent` metric.
    `ACS_OTP_RESEND_COOLDOWN_SECONDS`.
 5. Confirm the account SMS spending limit is set.
 
+## OTP delivery failing
+
+`OtpDeliveryFailed` rising means OTPs are not leaving. Clients are told to retry
+after 60 seconds, and each failure deletes its challenge, so nothing is left
+waiting for a code that was never sent.
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"otp delivery failed"' --max-items 20
+```
+
+The `error` field names the cause without the password, the message or the
+number. With `smpp`, in order:
+
+1. **Every send fails right after a deploy** — the password secret still holds the
+   stack's random placeholder. Set it as under
+   [Setting or rotating the SMPP password](#setting-or-rotating-the-smpp-password).
+2. **Connection refused or timeout** — the SMSC address is outside `SmppSmscCidr`,
+   the port is wrong, or the operator has not allowed the task's public address.
+   The tasks may open `SmppPort` to that range and nothing else. Task public IPs
+   change with every replacement, and the stack has no fixed-egress option yet
+   (#31), so an SMSC that allow-lists source addresses cannot be satisfied
+   reliably.
+3. **TLS failure** — the SMSC does not offer TLS on that port, or its certificate
+   is from an operator private CA. `ACS_SMPP_TLS_CA_FILE` names a CA bundle, but
+   it is not a stack parameter and the root filesystem is read-only, so the
+   bundle has to be built into the image until #31 delivers it. Turn TLS off
+   (`--smpp-tls false`) only on a private link, since SMPP sends the password in
+   clear.
+4. **A `command_status` name such as `ESME_RINVPASWD` or `ESME_RBINDFAIL`** — the
+   SMSC answered; take the name to the operator. A code outside the SMPP 3.4 table
+   is reported only as vendor-specific or unlisted, never by its number, because
+   the SMSC chooses the number freely; read it on the SMSC side.
+
+With `eum` or `sns`, check the origination identity, the sandbox and the account
+spending limit.
+
+`OtpStoreContention` is a store problem, not an SMS one: concurrent issue requests
+for one MSISDN kept invalidating each other's conditional writes. A burst for one
+number is expected and self-limiting. Sustained across many numbers, check
+DynamoDB throttling and the `5xx` alarm; throttling and capacity errors are raised
+as faults, not counted as contention.
+
+## Setting or rotating the SMPP password
+
+The operator issues the SMSC password, so the stack cannot generate it. With
+`SmsProvider=smpp` it creates the secret with a random 8-character placeholder,
+and every OTP answers `503` until the real value is in place:
+
+```bash
+SMPP_SECRET=$(aws cloudformation describe-stacks --region $REGION --stack-name $STACK \
+  --query "Stacks[0].Outputs[?OutputKey=='SmppPasswordSecretArn'].OutputValue" --output text)
+# In a subshell, so the umask and the trap end with it. The password is not
+# echoed and not in shell history; printf writes no trailing newline; the file
+# is readable only by you and removed on every exit path, failures included.
+(
+  umask 077
+  f=$(mktemp)
+  trap 'rm -f "$f"' EXIT
+  read -rs SMPP_PASSWORD
+  printf '%s' "$SMPP_PASSWORD" > "$f"
+  aws secretsmanager put-secret-value --region "$REGION" --secret-id "$SMPP_SECRET" \
+    --secret-string "file://$f"
+) && aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
+  --service rcs-acs-app-service --force-new-deployment
+```
+
+The password must be at most 8 printable ASCII characters (SMPP 3.4). Anything
+else stops the new tasks at startup with a configuration error that does not
+quote the value; the circuit breaker then rolls back to the running tasks, which
+still hold the previous value.
+
+Secrets are read at task start, so tasks started before the update keep the old
+value until the deployment replaces them. Agree the switch-over with the operator:
+if the SMSC accepts only the new password, OTPs fail on old tasks until the
+rollout completes.
+
+`scripts/deploy.sh` passes every `Smpp*` parameter on every run, so repeat the
+`--smpp-*` flags on every later deploy, or they reset to their defaults.
+
+## DM response encoding failed
+
+`DmEncodingError` is the server failing to encode its own WBXML response, answered
+with `500`. Session and device state are saved only after encoding succeeds, so
+nothing was stored and the client can retry. It is a server fault, not a device
+one: read the `dm response encoding failure` log entry and open an issue.
+`DmProtocolError` is the device-side counterpart — a request that could not be
+parsed or decoded, answered with `400`.
+
 ## 5xx alarm fired
 
 ```bash
@@ -152,7 +244,10 @@ scripts/deploy.sh --allowed-cidr <cidr> --certificate-arn <arn> \
   --image-tag <previous-git-sha> --skip-build
 ```
 
-Tags are immutable, so the previous image is still in ECR. The service deploys with
+Repeat every parameter the stack was deployed with, including `--sms-provider`
+and the `--smpp-*` flags; anything left out reverts to the script's default (see
+[releasing.md](releasing.md#an-aws-deployment)). Tags are immutable, so the
+previous image is still in ECR. The service deploys with
 `MinimumHealthyPercent: 100` and the circuit breaker enabled, so a bad rollout
 rolls itself back.
 

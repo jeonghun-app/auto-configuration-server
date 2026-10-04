@@ -1,6 +1,7 @@
 # GSMA RCS Auto Configuration Server (ACS)
 
 [![CI](https://github.com/jeonghun-app/auto-configuration-server/actions/workflows/ci.yml/badge.svg)](https://github.com/jeonghun-app/auto-configuration-server/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/jeonghun-app/auto-configuration-server?sort=semver)](https://github.com/jeonghun-app/auto-configuration-server/releases/latest)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11-blue.svg)](pyproject.toml)
 
@@ -12,7 +13,7 @@ Two planes in one service:
 | Plane | Protocol | Purpose |
 | --- | --- | --- |
 | **RCS configuration** | GSMA RCC.14 HTTP flow, OMA Client Provisioning (`wap-provisioningdoc` 1.1) | Provisions RCS clients: IMS identity, messaging, file transfer, capability discovery, chatbots |
-| **Device management** | OMA-DM, SyncML DM 1.2 | Manages VoLTE settings and device inventory after bootstrap, and is extended by dropping in a YAML management object |
+| **Device management** | OMA-DM, SyncML DM 1.2, XML or WBXML | Manages VoLTE settings and device inventory after bootstrap, and is extended by dropping in a YAML management object |
 
 The two are linked: the OMA-CP document contains the `w7` characteristic that
 bootstraps the OMA-DM account, so a device provisioned for RCS can immediately be
@@ -26,7 +27,7 @@ Korean version of this document: [README.ko.md](README.ko.md).
 
 ```bash
 make install                 # create .venv and install dependencies
-make test                    # 490 tests
+make test                    # the test suite
 make docker-run              # build and run the container on :8080
 make verify                  # end-to-end check of both planes
 ```
@@ -47,6 +48,24 @@ make verify
 make down
 ```
 
+## Container image
+
+Each release publishes a multi-architecture image (`linux/amd64`, `linux/arm64`)
+to the GitHub Container Registry, with an SBOM and provenance attached:
+
+```bash
+docker pull ghcr.io/jeonghun-app/auto-configuration-server:1.4.0
+docker run --rm -p 8080:8080 \
+  -e ACS_ENV=dev -e ACS_STORE_BACKEND=memory -e ACS_SMS_PROVIDER=mock \
+  -e ACS_ADMIN_TOKEN=local-admin-token \
+  ghcr.io/jeonghun-app/auto-configuration-server:1.4.0
+```
+
+`X.Y.Z` tags are never overwritten; `X.Y` and `latest` follow the newest release.
+Pin a deployment to the digest printed in the release notes. The settings above
+are for a local trial only; staging and production refuse the in-memory store and
+the mock SMS provider. How releases are cut: [docs/releasing.md](docs/releasing.md).
+
 ## Deploy to AWS
 
 Every backing service is an AWS managed service.
@@ -56,10 +75,10 @@ Every backing service is an AWS managed service.
 | Compute | ECS Fargate |
 | Ingress and TLS | Application Load Balancer + ACM |
 | State | DynamoDB (single table, TTL-expired OTP challenges and DM sessions) |
-| Secrets | Secrets Manager (admin token, PII hash key) |
+| Secrets | Secrets Manager (admin token, PII hash key, and the SMSC password with SMPP) |
 | Logs | CloudWatch Logs (structured JSON) |
 | Metrics | CloudWatch, via embedded metric format on stdout — no `PutMetricData` |
-| SMS | AWS End User Messaging SMS, or Amazon SNS |
+| SMS | AWS End User Messaging SMS or Amazon SNS for text OTP; an operator SMSC over SMPP 3.4 for port-addressed OTP |
 | Registry | ECR (immutable tags, scan on push) |
 | Infrastructure | CloudFormation |
 
@@ -173,15 +192,16 @@ specification requirement:
 
 | Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
 | --- | --- | --- | --- | --- | --- |
-| OMA-DM 1.2 (server role) | 58 | 37 | 5 | 16 | 10 |
-| RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 9 | 3 | 7 |
-| **Total** | **113** | **80** | **14** | **19** | **17** |
+| OMA-DM 1.2 (server role) | 58 | 37 | 6 | 15 | 10 |
+| RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 10 | 2 | 7 |
+| **Total** | **113** | **80** | **16** | **17** | **17** |
 
 **The honest answer is "substantially, and here is exactly what is missing".**
 `scripts/gen_conformance.py --strict` exits non-zero, and will keep doing so while
-those 17 mandatory gaps remain. The largest are WBXML SyncML encoding, MaxMsgSize
-message splitting, DM ACLs, server-to-client DM authentication, and completing the
-MSISDN recovery flow.
+those 17 mandatory gaps remain. The largest are MaxMsgSize message splitting, DM
+ACLs, server-to-client DM authentication, completing the MSISDN recovery flow, and
+WBXML beyond the text-valued subset (supported since 1.4.0, so `partial`, but still
+a gap).
 
 Four axes are kept deliberately separate so that "implemented" cannot be read as
 "certified": the requirement's **level**, whether that level was **verified**
@@ -226,6 +246,12 @@ device inventory, `source: server` nodes are pushed with `Replace`. Adding
 firmware update (FUMO), a vendor MO, or more VoLTE parameters means adding a YAML
 file — no server code changes. `GET /dm/mo` lists what is loaded.
 
+Sessions are accepted in XML and in WBXML (`application/vnd.syncml.dm+wbxml`) and
+answered in the encoding they arrived in. The WBXML codec covers the text-valued
+SyncML and MetInf subset; binary `OPAQUE` and the rarer WBXML constructs are
+refused with `400`, and responses are not yet split to fit the client's
+`MaxMsgSize`.
+
 See [docs/oma-dm.md](docs/oma-dm.md).
 
 ## Operator console
@@ -261,7 +287,7 @@ Security posture, because this page renders subscriber data over the network:
 | --- | --- |
 | `GET /`, `/config`, `/rcs/config` | RCC.14 configuration request (deployed clients differ on the path) |
 | `POST` on the same paths | OTP step for clients that avoid putting the OTP in a query string |
-| `POST /dm` | OMA-DM SyncML session |
+| `POST /dm` | OMA-DM SyncML session, XML or WBXML |
 | `GET /dm/mo` | Loaded management objects |
 | `GET /msisdn`, `POST /msisdn`, `POST /msisdn/verify` | MSISDN entry web flow after a `511`. Collects and verifies the number; does **not** yet complete provisioning (`RCC14-AUTH-MSISDN-FLOW`) |
 | `GET /admin/ui` | **Operator console** — server-rendered management pages |
@@ -292,6 +318,9 @@ All settings come from `ACS_`-prefixed environment variables; see
 | `ACS_PII_LOG_MODE` | `mask` | Subscriber identifiers are never logged in the clear |
 | `ACS_DEFAULT_COUNTRY_CODE` | *(empty)* | A national-format MSISDN is refused rather than guessed at; guessing a country would provision the wrong subscriber. Set `82` for Korea |
 | `ACS_STORE_BACKEND` | `memory` | Refused in staging/prod: in-memory OTP state breaks the moment there is more than one task |
+| `ACS_SMS_PROVIDER` | `mock` | Refused in staging/prod. `eum` or `sns` send text OTP only; `smpp` is the only provider that can send a port-addressed OTP |
+| `ACS_SMPP_TLS` | `true` | SMPP sends the password in clear; turn TLS off only on a private link to the SMSC. Host, `system_id` and password are required in staging/prod |
+| `ACS_SMPP_TIMEOUT_SECONDS` | `10` | Per SMSC response, at most 60: the handset's HTTP request waits on it |
 
 Startup validation refuses to boot on a configuration that would be unsafe for
 the declared environment. A misconfigured ACS that starts anyway can switch RCS
@@ -311,7 +340,8 @@ that:
   MSISDN, OTP and token; enabling them creates a bucket of subscriber data.
 - **OTP abuse controls.** Per-MSISDN cooldown, daily cap, bounded verification
   attempts, single use, constant-time comparison, and a CloudWatch alarm on send
-  volume.
+  volume. Issue and consumption are atomic in the store, so concurrent requests,
+  also across tasks, cannot exceed a limit or verify one code twice.
 - **Tokens hashed at rest**, bound to IMSI and IMEI, individually revocable.
 - **No subscriber enumeration.** Known and unknown identities get the same
   response shape.
@@ -328,7 +358,8 @@ Stated plainly, because an ACS that pretends is worse than one that admits:
 
 | Item | Why | What is here instead |
 | --- | --- | --- |
-| Port-addressed (silent) OTP SMS | Needs a UDH-capable operator SMSC over SMPP. No AWS SMS service can send it. | The interface carries `SMS_port` end to end, the AWS providers refuse rather than downgrade, and `SmppSmsSender.build_udh()` implements the header |
+| Proven port-addressed (silent) OTP SMS | Needs an operator SMSC account and a real handset. No AWS SMS service can send it | An SMPP 3.4 client (`ACS_SMS_PROVIDER=smpp`) tested octet for octet against a fake SMSC; the AWS providers refuse rather than downgrade |
+| Server-initiated DM sessions | Needs a DM notification (WAP Push or trigger SMS), which nothing here builds | `Alert` 1200 is accepted if something else wakes the device |
 | Real GBA / AKA | Needs a USIM, a BSF over Ub and Zn, and an HSS | The HTTP challenge/response shape, a `BsfClient` port, and a deterministic mock |
 | Real operator header enrichment | Needs an operator packet gateway | Trusted-proxy gated header, off by default |
 | Being reachable at `config.rcs.mncXXX.mccYYY.pub.3gppnetwork.org` | That DNS zone is operator and GSMA controlled | The deploy output tells you the CNAME to create |
@@ -350,15 +381,15 @@ src/acs/
     request.py               RCC.14 query parsing
     vers.py                  configuration version semantics
     omacp/                   OMA-CP catalogue, builder, XML writer
-    omadm/                   SyncML DM parser, MO tree, session state machine
+    omadm/                   SyncML DM parser, WBXML codec, MO tree, session state machine
   catalog/omacp/             provisioning parameters (YAML)
   catalog/omadm/             management objects (YAML)
-  sms/                       AWS End User Messaging, SNS, SMPP stub, mock
+  sms/                       AWS End User Messaging, SNS, SMPP 3.4, mock
   store/                     DynamoDB and in-memory backends
 tools/                       RCS and OMA-DM client simulators
 scripts/                     deploy, teardown, verify, seed, coverage generator
 infra/                       CloudFormation (ECR and application stacks)
-tests/                       490 tests
+tests/                       the test suite
 docs/                        scope, protocol, OMA-DM, AWS, limitations, ADRs
 ```
 
@@ -369,13 +400,13 @@ make check      # lint + mypy strict + tests with coverage gate + cfn-lint
                 # + shellcheck + spec-coverage freshness
 ```
 
-Current state, measured on this repository:
+Current state; the exact counts are in each CI run:
 
 | Check | Result |
 | --- | --- |
-| `pytest` | 490 passed |
-| Coverage | 93% |
-| `mypy --strict` | clean, 46 source files |
+| `pytest` | all pass |
+| Coverage | above the 88% gate |
+| `mypy --strict` | clean, whole source tree |
 | `ruff` (lint + format) | clean |
 | `cfn-lint` | clean |
 | Container | builds, runs as UID 10001, `/healthz` 200 |
@@ -396,7 +427,12 @@ Current state, measured on this repository:
 | [docs/limitations.md](docs/limitations.md) | Everything this cannot do |
 | [docs/threat-model.md](docs/threat-model.md) | Assets, attackers, mitigations |
 | [docs/runbook.md](docs/runbook.md) | Operational procedures |
+| [docs/releasing.md](docs/releasing.md) | Versioning, cutting a release, the GHCR image, rollback |
 | [docs/adr/](docs/adr/) | Architecture decision records |
+| [CHANGELOG.md](CHANGELOG.md) | What changed in each release, with upgrade notes |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Setting up, the checks a pull request must pass, conventions |
+| [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) | Contributor Covenant 2.1 |
+| [SECURITY.md](SECURITY.md) | Reporting a vulnerability privately |
 
 ## License
 

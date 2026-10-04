@@ -364,6 +364,7 @@ requirements:
     tests:
       - tests/test_otp.py::test_valid_otp_verifies_once
       - tests/test_provisioning_service.py::test_otp_verification_consumes_the_challenge
+      - tests/test_otp_atomicity.py::test_one_code_verifies_once_under_concurrent_requests
 
   - id: RCC14-AUTH-OTP-ABUSE
     title: Bound OTP sends and verification attempts
@@ -377,25 +378,42 @@ requirements:
       - tests/test_otp.py::test_daily_quota_stops_sms_pumping
       - tests/test_otp.py::test_attempts_are_bounded
       - tests/test_otp.py::test_resend_within_the_cooldown_is_blocked
-    note: An unbounded OTP endpoint is a direct financial attack on the operator.
+      - tests/test_otp_atomicity.py::test_concurrent_issues_never_exceed_the_daily_cap
+      - tests/test_otp_atomicity.py::test_concurrent_wrong_guesses_each_spend_an_attempt
+    note: >
+      An unbounded OTP endpoint is a direct financial attack on the operator. The
+      limits are enforced by atomic store operations (conditional writes on
+      DynamoDB), so concurrent requests, also across tasks, cannot exceed them.
 
   - id: RCC14-AUTH-OTP-PORT
     title: Deliver the OTP as a port-addressed binary SMS when SMS_port is given
     spec: RCC.14 OTP delivery
     level: conditional
-    status: not-implemented
+    status: partial
     verification: behaviour-tested
+    implemented_by:
+      - src/acs/sms/smpp.py::SmppSmsSender.send
+      - src/acs/sms/smpp.py::encode_short_message
     tests:
-      - tests/test_sms.py::test_smpp_sender_is_explicitly_unimplemented
+      - tests/test_smpp.py::test_port_addressed_submit_sm_carries_the_udh_with_udhi_and_8bit_coding
+      - tests/test_smpp.py::test_bind_transceiver_pdu_is_encoded_octet_for_octet
+      - tests/test_smpp.py::test_a_port_addressed_otp_reaches_the_smsc_through_the_service
+      - tests/test_smpp.py::test_an_smsc_failure_answers_503_and_deletes_the_challenge
       - tests/test_sms.py::test_port_addressing_udh_is_built_correctly
       - tests/test_provisioning_service.py::test_port_addressed_otp_is_refused_rather_than_downgraded
     gap: >
-      No AWS SMS service can set a User Data Header. SMS_port is carried end to
-      end, the UDH builder is implemented and tested, and the AWS providers raise
-      rather than send a text message the client will never read.
+      With sms_provider=smpp the OTP is sent through an operator SMSC over SMPP 3.4
+      as 8-bit data with UDHI set and the 16-bit application port UDH. This has been
+      exercised only against the in-process fake SMSC in the test suite, never
+      against an operator SMSC or a handset. The user data after the UDH is the
+      configured OTP template; the content an RCS client expects there is not taken
+      from a pinned RCC.14 edition. Messages longer than one SMS are refused, not
+      concatenated. The AWS providers still refuse SMS_port.
     impact: >
-      Silent OTP delivery is unavailable, so the user must read and type the code.
-      Requires an operator SMSC over SMPP.
+      Silent OTP delivery is unproven until tested with the operator's SMSC and a
+      real client. An SMSC failure answers 503 with Retry-After and deletes the
+      challenge, so the client is never left waiting for a message that was not
+      sent.
 
   - id: RCC14-AUTH-TOKEN
     title: Let a token replace the OTP challenge on later requests

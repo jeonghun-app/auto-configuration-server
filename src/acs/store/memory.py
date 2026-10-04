@@ -6,10 +6,21 @@ OTP challenges and DM sessions would not be visible to sibling ECS tasks.
 
 from __future__ import annotations
 
+import dataclasses
 import threading
 import time
 
 from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+from acs.store.base import OtpIssueRefused
+
+
+def _unchanged(current: OtpChallenge, expected: OtpChallenge) -> bool:
+    """The same condition DynamoDbStore puts on its conditional writes."""
+    if current.attempts != expected.attempts:
+        return False
+    if expected.challenge_id:
+        return current.challenge_id == expected.challenge_id
+    return (current.otp_hash, current.created_at) == (expected.otp_hash, expected.created_at)
 
 
 class MemoryStore:
@@ -55,28 +66,43 @@ class MemoryStore:
             return list(self._subscribers.values())[:limit]
 
     # ---- OTP --------------------------------------------------------------
-    def put_otp(self, challenge: OtpChallenge) -> None:
-        with self._lock:
-            self._otp[challenge.msisdn] = challenge
-
+    # Challenges are copied in and out, as DynamoDB would, so a caller mutating
+    # the object it read cannot change the stored state behind replace_otp.
     def get_otp(self, msisdn: str) -> OtpChallenge | None:
         with self._lock:
-            return self._otp.get(msisdn)
+            challenge = self._otp.get(msisdn)
+            return dataclasses.replace(challenge) if challenge else None
 
-    def delete_otp(self, msisdn: str) -> None:
+    def issue_otp(
+        self,
+        challenge: OtpChallenge,
+        cooldown_seconds: int,
+        max_sends_per_day: int,
+        now: int,
+    ) -> OtpIssueRefused | None:
         with self._lock:
-            self._otp.pop(msisdn, None)
+            existing = self._otp.get(challenge.msisdn)
+            if existing and not existing.consumed and not existing.expired(now):
+                age = now - existing.created_at
+                if age < cooldown_seconds:
+                    return OtpIssueRefused("cooldown", cooldown_seconds - age)
+            sends = [t for t in self._otp_sends.get(challenge.msisdn, []) if t >= now - 86400]
+            if len(sends) >= max_sends_per_day:
+                return OtpIssueRefused("daily_quota", 3600)
+            self._otp_sends[challenge.msisdn] = [*sends, now]
+            self._otp[challenge.msisdn] = dataclasses.replace(challenge)
+            return None
 
-    def count_otp_sends_today(self, msisdn: str) -> int:
-        cutoff = int(time.time()) - 86400
+    def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
         with self._lock:
-            sends = [t for t in self._otp_sends.get(msisdn, []) if t >= cutoff]
-            self._otp_sends[msisdn] = sends
-            return len(sends)
-
-    def record_otp_send(self, msisdn: str) -> None:
-        with self._lock:
-            self._otp_sends.setdefault(msisdn, []).append(int(time.time()))
+            current = self._otp.get(expected.msisdn)
+            if current is None or not _unchanged(current, expected):
+                return False
+            if replacement is None:
+                del self._otp[expected.msisdn]
+            else:
+                self._otp[expected.msisdn] = dataclasses.replace(replacement)
+            return True
 
     # ---- tokens -----------------------------------------------------------
     def put_token(self, record: TokenRecord) -> None:

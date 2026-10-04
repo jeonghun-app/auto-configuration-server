@@ -16,6 +16,7 @@ from acs.protocol.omacp.catalog import get_catalog
 from acs.protocol.omadm.motree import get_tree
 from acs.protocol.omadm.session import DmService
 from acs.sms.base import MockSmsSender
+from acs.store.base import Store
 from acs.store.memory import MemoryStore
 
 TEST_IMSI = "001010000000001"
@@ -113,6 +114,13 @@ def pytest_collection_modifyitems(
 @pytest.fixture
 def collected_node_ids(request: pytest.FixtureRequest) -> frozenset[str]:
     return request.config.stash.get(_COLLECTED, frozenset())
+
+
+def clear_otp(store: Store, msisdn: str = TEST_MSISDN) -> None:
+    """Drop the pending challenge between test steps, through the atomic API."""
+    challenge = store.get_otp(msisdn)
+    if challenge is not None:
+        store.replace_otp(challenge, None)
 
 
 def base_query(**extra: object) -> dict[str, object]:

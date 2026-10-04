@@ -66,9 +66,23 @@ class OtpChallenge:
     attempts: int = 0
     sms_port: int | None = None
     consumed: bool = False
+    challenge_id: str = ""
+    """Random per issue. Empty on a challenge stored by 1.3, which ignores the
+    attribute on read and drops it when it rewrites the challenge."""
 
     def expired(self, at: int | None = None) -> bool:
         return (at or now()) >= self.expires_at
+
+    def same_issue(self, other: OtpChallenge) -> bool:
+        """Whether both describe the same issued challenge, attempts aside.
+
+        A code and a creation second do not identify an issue: the same code can
+        be drawn twice within one second. The id does; without one on either side
+        the code and creation time are the best that remains.
+        """
+        if self.challenge_id and other.challenge_id:
+            return self.challenge_id == other.challenge_id
+        return (self.otp_hash, self.created_at) == (other.otp_hash, other.created_at)
 
     def to_item(self) -> dict[str, Any]:
         return dataclasses.asdict(self)

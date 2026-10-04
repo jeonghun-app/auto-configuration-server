@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 from fastapi.testclient import TestClient
 from tests.conftest import (
@@ -15,7 +17,10 @@ from tests.conftest import (
 from acs.app import create_app
 from acs.config import Settings
 from acs.domain.models import Subscriber
+from acs.domain.service import ProvisioningService
 from acs.protocol.omacp import writer
+from acs.sms.base import SmsDeliveryFailed, SmsRequest, SmsResult
+from acs.store.base import OtpStoreContention
 from acs.store.memory import MemoryStore
 
 
@@ -240,3 +245,78 @@ def test_wrong_otp_in_the_web_flow_is_refused(client: TestClient) -> None:
         "/msisdn/verify", data={"msisdn": TEST_MSISDN, "otp": "000000", "csrf": csrf2}
     )
     assert response.status_code == 400
+
+
+class FailingSender:
+    name = "failing"
+
+    def send(self, request: SmsRequest) -> SmsResult:
+        raise SmsDeliveryFailed("SMSC did not answer")
+
+
+def test_msisdn_flow_deletes_the_challenge_when_delivery_fails(
+    client: TestClient, seeded_store: MemoryStore
+) -> None:
+    client.app.state.acs.sms = FailingSender()  # type: ignore[attr-defined]
+    page = client.get("/msisdn")
+    csrf = page.text.split('name="csrf" value="')[1].split('"')[0]
+    submitted = client.post("/msisdn", data={"msisdn": TEST_MSISDN, "csrf": csrf})
+    # Same page as a success, so the flow still does not reveal which numbers exist.
+    assert "If that number is eligible" in submitted.text
+    assert seeded_store.get_otp(TEST_MSISDN) is None
+
+
+class StallingSender:
+    """Blocks inside send() until released, as a slow SMSC would."""
+
+    name = "stalling"
+
+    def __init__(self) -> None:
+        self.entered = threading.Event()
+        self.released = threading.Event()
+        self.released_in_time = False
+
+    def send(self, request: SmsRequest) -> SmsResult:
+        self.entered.set()
+        self.released_in_time = self.released.wait(timeout=5)
+        return SmsResult(self.name, "stalled-1")
+
+
+@pytest.mark.parametrize("flow", ["config", "msisdn"])
+def test_a_slow_sms_send_does_not_block_other_requests(
+    client: TestClient, settings: Settings, seeded_store: MemoryStore, flow: str
+) -> None:
+    sender = StallingSender()
+    state = client.app.state.acs  # type: ignore[attr-defined]
+    state.sms = sender
+    state.provisioning = ProvisioningService(settings, seeded_store, sender)
+    csrf = client.get("/msisdn").text.split('name="csrf" value="')[1].split('"')[0]
+
+    def stalled_request() -> None:
+        if flow == "config":
+            client.get("/", params=base_query())
+        else:
+            client.post("/msisdn", data={"msisdn": TEST_MSISDN, "csrf": csrf})
+
+    worker = threading.Thread(target=stalled_request, daemon=True)
+    worker.start()
+    assert sender.entered.wait(timeout=5)
+    # Served while send() is still blocked: impossible if send ran on the loop.
+    assert client.get("/healthz").status_code == 200
+    sender.released.set()
+    worker.join(timeout=5)
+    assert sender.released_in_time
+
+
+def test_msisdn_flow_survives_store_contention(
+    client: TestClient, seeded_store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def contended(*_args: object, **_kwargs: object) -> None:
+        raise OtpStoreContention("busy")
+
+    monkeypatch.setattr(seeded_store, "issue_otp", contended)
+    page = client.get("/msisdn")
+    csrf = page.text.split('name="csrf" value="')[1].split('"')[0]
+    submitted = client.post("/msisdn", data={"msisdn": TEST_MSISDN, "csrf": csrf})
+    assert submitted.status_code == 200
+    assert "If that number is eligible" in submitted.text

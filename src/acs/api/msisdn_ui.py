@@ -19,6 +19,7 @@ from acs.auth import otp as otp_mod
 from acs.observability import get_logger
 from acs.security.pii import normalise_msisdn
 from acs.sms.base import SmsRequest, UnsupportedDelivery
+from acs.store.base import OtpStoreContention
 
 log = get_logger(__name__)
 router = APIRouter(tags=["msisdn-flow"])
@@ -138,7 +139,7 @@ def msisdn_submit(
     # cannot be used to test which numbers exist on the network.
     if subscriber is not None:
         try:
-            _, clear_otp = otp_mod.create_challenge(
+            challenge, clear_otp = otp_mod.create_challenge(
                 store=app_state.store,
                 msisdn=normalised,
                 imsi=subscriber.imsi,
@@ -151,7 +152,12 @@ def msisdn_submit(
                     sender_id=app_state.settings.sms_sender_id,
                 )
             )
-        except (otp_mod.SendBlocked, UnsupportedDelivery) as exc:
+        except (otp_mod.SendBlocked, OtpStoreContention) as exc:
+            log.info("msisdn flow otp not sent", extra={"reason": str(exc)})
+        except UnsupportedDelivery as exc:
+            # As in the RCC.14 flow: a challenge whose code never left must not
+            # hold the resend cooldown or wait to be guessed.
+            otp_mod.discard_challenge(app_state.store, challenge)
             log.info("msisdn flow otp not sent", extra={"reason": str(exc)})
 
     new_csrf = secrets.token_urlsafe(24)

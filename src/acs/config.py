@@ -10,12 +10,12 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["dev", "test", "staging", "prod"]
 StoreBackend = Literal["memory", "dynamodb"]
-SmsProvider = Literal["mock", "sns", "eum"]
+SmsProvider = Literal["mock", "sns", "eum", "smpp"]
 PiiLogMode = Literal["mask", "hash", "none"]
 
 
@@ -110,6 +110,30 @@ class Settings(BaseSettings):
     sms_sender_id: str = "RCS"
     sms_otp_template: str = "RCS activation code: {otp}"
 
+    smpp_host: str = ""
+    """Operator SMSC for sms_provider=smpp, the only provider that can send a
+    port-addressed (silent) OTP."""
+    smpp_port: int = Field(default=2775, ge=1, le=65535)
+    smpp_system_id: str = ""
+    smpp_password: SecretStr = SecretStr("")
+    smpp_system_type: str = ""
+    smpp_source_addr: str = ""
+    """Empty uses sms_sender_id. The TON/NPI below must describe whichever is used."""
+    smpp_source_addr_ton: int = 5
+    """5 = alphanumeric, matching the default sender id "RCS"."""
+    smpp_source_addr_npi: int = 0
+    smpp_dest_addr_ton: int = 1
+    """1 = international: the destination is the E.164 MSISDN without "+"."""
+    smpp_dest_addr_npi: int = 1
+    """1 = ISDN (E.164)."""
+    smpp_tls: bool = True
+    """SMPP sends the password in clear. Turn off only on a private link to the SMSC."""
+    smpp_tls_ca_file: str = ""
+    """CA bundle for an SMSC certificate from an operator private CA."""
+    smpp_timeout_seconds: float = Field(default=10.0, gt=0, le=60, allow_inf_nan=False)
+    """Per response. Capped because the request thread waits on it while the
+    client is waiting for its HTTP answer."""
+
     # ---- Operational ------------------------------------------------------
     admin_token: str = ""
     """Empty (default) makes the admin API answer 503 — never a default token."""
@@ -118,6 +142,16 @@ class Settings(BaseSettings):
     pii_log_mode: PiiLogMode = "mask"
     pii_hash_secret: str = ""
     rate_limit_per_ip_per_minute: int = 60
+
+    @field_validator("smpp_password")
+    @classmethod
+    def _smpp_password(cls, v: SecretStr) -> SecretStr:
+        # A secret written from a file usually ends in a newline, which can never
+        # be part of an SMPP password (a printable C-Octet String). Left in, it
+        # makes an 8-character password 9 and fails every bind.
+        # Length and characters are checked in validate_startup, not here: a
+        # pydantic error quotes the raw input, which would print the password.
+        return SecretStr(v.get_secret_value().rstrip("\r\n"))
 
     @field_validator("log_level")
     @classmethod
@@ -149,6 +183,20 @@ class Settings(BaseSettings):
                 problems.append("dev_endpoints_enabled must be false in staging/prod.")
             if self.sms_provider == "mock":
                 problems.append("sms_provider=mock cannot be used in staging/prod.")
+            if self.sms_provider == "smpp":
+                missing = [
+                    name
+                    for name, value in (
+                        ("smpp_host", self.smpp_host),
+                        ("smpp_system_id", self.smpp_system_id),
+                        ("smpp_password", self.smpp_password.get_secret_value()),
+                    )
+                    if not value
+                ]
+                if missing:
+                    problems.append(
+                        "sms_provider=smpp requires " + ", ".join(missing) + " in staging/prod."
+                    )
             if self.pii_log_mode == "none":
                 problems.append("pii_log_mode=none is not permitted in staging/prod.")
             if self.pii_log_mode == "hash" and not self.pii_hash_secret:
@@ -160,6 +208,11 @@ class Settings(BaseSettings):
                 "gba_enabled requires gba_nonce_secret: an unsigned nonce cannot be "
                 "verified, so the Digest response check would be bypassable."
             )
+        password = self.smpp_password.get_secret_value()
+        if len(password) > 8:
+            problems.append("smpp_password must be at most 8 characters (SMPP 3.4).")
+        if not all(" " <= ch <= "~" for ch in password):
+            problems.append("smpp_password must be printable ASCII.")
         if self.otp_length < 4 or self.otp_length > 10:
             problems.append("otp_length must be between 4 and 10.")
         return problems

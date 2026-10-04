@@ -7,9 +7,26 @@ also used locally against the ``amazon/dynamodb-local`` container).
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import dataclasses
+from typing import Literal, Protocol, runtime_checkable
 
 from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class OtpIssueRefused:
+    """Why :meth:`Store.issue_otp` did not store a challenge."""
+
+    reason: Literal["cooldown", "daily_quota"]
+    retry_after: int
+
+
+class OtpStoreContention(RuntimeError):
+    """Concurrent writers for one MSISDN kept winning; nothing was stored.
+
+    Distinct from a cooldown: answering "pending" would leave the client waiting
+    for an SMS that was never sent.
+    """
 
 
 @runtime_checkable
@@ -24,11 +41,35 @@ class Store(Protocol):
     def list_subscribers(self, limit: int = 100) -> list[Subscriber]: ...
 
     # ---- OTP challenges ---------------------------------------------------
-    def put_otp(self, challenge: OtpChallenge) -> None: ...
+    # issue_otp and replace_otp are the only ways to change a challenge; there is
+    # deliberately no unconditional put or delete. Each is atomic per MSISDN, also
+    # across ECS tasks: a separate read and write would let concurrent requests
+    # exceed the daily cap, verify one code twice, or delete a newer challenge.
     def get_otp(self, msisdn: str) -> OtpChallenge | None: ...
-    def delete_otp(self, msisdn: str) -> None: ...
-    def count_otp_sends_today(self, msisdn: str) -> int: ...
-    def record_otp_send(self, msisdn: str) -> None: ...
+
+    def issue_otp(
+        self,
+        challenge: OtpChallenge,
+        cooldown_seconds: int,
+        max_sends_per_day: int,
+        now: int,
+    ) -> OtpIssueRefused | None:
+        """Store ``challenge`` and count the send, unless the cooldown or cap applies.
+
+        The cooldown applies while an unconsumed, unexpired challenge younger than
+        ``cooldown_seconds`` exists. The cap counts sends in the 24 hours before
+        ``now``. Raises :class:`OtpStoreContention` if concurrent writers keep
+        winning.
+        """
+        ...
+
+    def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
+        """Swap the stored challenge for ``replacement`` (``None`` deletes it).
+
+        Succeeds only if the stored challenge is still ``expected`` — same code,
+        creation time and attempt count — and returns whether it did.
+        """
+        ...
 
     # ---- tokens -----------------------------------------------------------
     def put_token(self, record: TokenRecord) -> None: ...

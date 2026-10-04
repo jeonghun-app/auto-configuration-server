@@ -26,6 +26,17 @@ class UnsupportedDelivery(RuntimeError):
     """The provider cannot satisfy the requested delivery mode."""
 
 
+class SmsDeliveryFailed(UnsupportedDelivery):
+    """The provider attempted delivery and it failed.
+
+    A subclass of :class:`UnsupportedDelivery` so every caller that already turns
+    an undeliverable OTP into ``503`` + ``Retry-After`` and deletes the challenge
+    does the same for a provider outage, instead of leaving the client waiting for
+    a message that was never sent. The message must not contain the body, the
+    destination number or a credential: callers log it.
+    """
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class SmsRequest:
     msisdn: str

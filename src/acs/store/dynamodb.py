@@ -5,7 +5,8 @@ Table design (partition key ``pk``, sort key ``sk``)::
     SUB#<imsi>       META          subscriber record
     MSISDN#<msisdn>  SUB           reverse index -> imsi
     OTP#<msisdn>     CHAL          pending OTP challenge          (TTL)
-    OTPSEND#<msisdn> <epoch>       OTP send audit for quotas      (TTL)
+    OTPQUOTA#<msisdn> SENDS        send times for the daily cap   (TTL)
+    OTPSEND#<msisdn> <epoch>       legacy send rows: seed OTPQUOTA#, dual-written for 1.3
     TOKEN#<sha256>   META          provisioning token            (TTL)
     DEV#<device_id>  META          managed device
     DMSESS#<sid>     META          OMA-DM session state           (TTL)
@@ -29,11 +30,17 @@ from botocore.exceptions import ClientError
 
 from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
 from acs.observability import get_logger
+from acs.store.base import OtpIssueRefused, OtpStoreContention
 
 log = get_logger(__name__)
 
 _ENTITY_SUBSCRIBER = "subscriber"
 _ENTITY_DEVICE = "device"
+
+# Optimistic writes retry only when another request changed the same MSISDN's
+# challenge in between. A loser re-reads and then normally meets the cooldown, so
+# a handful of rounds is plenty; past that the send is refused, never let through.
+_OTP_WRITE_ROUNDS = 5
 
 
 def _clean(value: Any) -> Any:
@@ -58,6 +65,41 @@ def _encode(item: dict[str, Any]) -> dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+def _same_challenge(challenge: OtpChallenge) -> dict[str, Any]:
+    """Condition that the stored challenge is ``challenge``, unchanged since read.
+
+    By id when it has one. A challenge stored by 1.3 has none, so it falls back to
+    code, creation time and attempts, the condition 1.4.0 used.
+    """
+    if challenge.challenge_id:
+        return {
+            "ConditionExpression": "challenge_id = :id AND attempts = :a",
+            "ExpressionAttributeValues": {
+                ":id": challenge.challenge_id,
+                ":a": challenge.attempts,
+            },
+        }
+    return {
+        "ConditionExpression": "otp_hash = :h AND created_at = :c AND attempts = :a",
+        "ExpressionAttributeValues": {
+            ":h": challenge.otp_hash,
+            ":c": challenge.created_at,
+            ":a": challenge.attempts,
+        },
+    }
+
+
+def _lost_a_condition(exc: ClientError) -> bool:
+    """Whether a cancelled transaction failed only on its conditions."""
+    if exc.response.get("Error", {}).get("Code") != "TransactionCanceledException":
+        return False
+    codes = {
+        str(reason.get("Code", "None")) for reason in exc.response.get("CancellationReasons", [])
+    }
+    codes.discard("None")
+    return codes == {"ConditionalCheckFailed"}
 
 
 class DynamoDbStore:
@@ -153,39 +195,124 @@ class DynamoDbStore:
         return [Subscriber.from_item(i) for i in items]
 
     # ---- OTP --------------------------------------------------------------
-    def put_otp(self, challenge: OtpChallenge) -> None:
-        item = challenge.to_item()
-        item.update({"pk": f"OTP#{challenge.msisdn}", "sk": "CHAL", "entity": "otp"})
-        self._put(item)
-
     def get_otp(self, msisdn: str) -> OtpChallenge | None:
         item = self._get(f"OTP#{msisdn}", "CHAL")
         return OtpChallenge.from_item(item) if item else None
 
-    def delete_otp(self, msisdn: str) -> None:
-        self._delete(f"OTP#{msisdn}", "CHAL")
+    def issue_otp(
+        self,
+        challenge: OtpChallenge,
+        cooldown_seconds: int,
+        max_sends_per_day: int,
+        now: int,
+    ) -> OtpIssueRefused | None:
+        # Read both items, decide, then write both in one transaction conditioned
+        # on neither having changed since the read. The quota item carries a
+        # version because a list of send times cannot be compared in a condition.
+        msisdn = challenge.msisdn
+        quota_key = {"pk": f"OTPQUOTA#{msisdn}", "sk": "SENDS"}
+        challenge_key = {"pk": f"OTP#{msisdn}", "sk": "CHAL"}
+        client = self._table.meta.client
+        for _ in range(_OTP_WRITE_ROUNDS):
+            quota = self._get_consistent(quota_key)
+            raw_existing = self._get_consistent(challenge_key)
+            existing = OtpChallenge.from_item(raw_existing) if raw_existing else None
+            if existing and not existing.consumed and not existing.expired(now):
+                age = now - existing.created_at
+                if age < cooldown_seconds:
+                    return OtpIssueRefused("cooldown", cooldown_seconds - age)
+            history = quota["sends"] if quota else self._legacy_sends(msisdn, now)
+            sends = [int(t) for t in history if int(t) >= now - 86400]
+            if len(sends) >= max_sends_per_day:
+                return OtpIssueRefused("daily_quota", 3600)
 
-    def count_otp_sends_today(self, msisdn: str) -> int:
+            version = int((quota or {}).get("version", 0))
+            quota_put: dict[str, Any] = {
+                "TableName": self._table_name,
+                "Item": {
+                    **quota_key,
+                    "entity": "otp_quota",
+                    "sends": [*sends, now],
+                    "version": version + 1,
+                    "expires_at": now + 86400,
+                },
+            }
+            if quota is None:
+                quota_put["ConditionExpression"] = "attribute_not_exists(pk)"
+            else:
+                quota_put["ConditionExpression"] = "version = :v"
+                quota_put["ExpressionAttributeValues"] = {":v": version}
+
+            item = challenge.to_item()
+            item.update({**challenge_key, "entity": "otp"})
+            challenge_put: dict[str, Any] = {"TableName": self._table_name, "Item": _encode(item)}
+            if existing is None:
+                challenge_put["ConditionExpression"] = "attribute_not_exists(pk)"
+            else:
+                challenge_put.update(_same_challenge(existing))
+            # Mixed-version compatibility, to be removed by #28 ("Stop dual-writing
+            # legacy OTPSEND rows") once no 1.3 task can be running: 1.3 counts
+            # the daily cap by querying these rows, so during a rolling deployment
+            # it must see the sends made here. Same key, attributes and TTL as
+            # 1.3's record_otp_send. Unconditional, as 1.3 wrote it.
+            legacy_put: dict[str, Any] = {
+                "TableName": self._table_name,
+                "Item": {
+                    "pk": f"OTPSEND#{msisdn}",
+                    "sk": str(now).zfill(12),
+                    "entity": "otp_send",
+                    "expires_at": now + 86400,
+                },
+            }
+            try:
+                client.transact_write_items(
+                    TransactItems=[{"Put": quota_put}, {"Put": challenge_put}, {"Put": legacy_put}]
+                )
+            except ClientError as exc:
+                if not _lost_a_condition(exc):
+                    # Throttling, validation or capacity: a fault, not contention,
+                    # and retrying it here would only hide it.
+                    raise
+                continue
+            return None
+        log.warning("otp issue lost every optimistic write round")
+        raise OtpStoreContention("concurrent OTP issue for one MSISDN kept conflicting")
+
+    def _legacy_sends(self, msisdn: str, now: int) -> list[int]:
+        """Send times from the OTPSEND# rows written before the quota item existed.
+
+        Read once, when the quota item is first created, so the deployment that
+        introduced it does not reset every daily count to zero. The rows expire by
+        TTL within 24 hours, after which this finds nothing.
+        """
         from boto3.dynamodb.conditions import Key
 
-        cutoff = int(time.time()) - 86400
         response = self._table.query(
             KeyConditionExpression=Key("pk").eq(f"OTPSEND#{msisdn}")
-            & Key("sk").gte(str(cutoff).zfill(12)),
-            Select="COUNT",
+            & Key("sk").gte(str(now - 86400).zfill(12)),
+            ConsistentRead=True,
         )
-        return int(response.get("Count", 0))
+        return [int(item["sk"]) for item in response.get("Items", [])]
 
-    def record_otp_send(self, msisdn: str) -> None:
-        stamp = int(time.time())
-        self._put(
-            {
-                "pk": f"OTPSEND#{msisdn}",
-                "sk": str(stamp).zfill(12),
-                "entity": "otp_send",
-                "expires_at": stamp + 86400,
-            }
-        )
+    def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
+        key = {"pk": f"OTP#{expected.msisdn}", "sk": "CHAL"}
+        condition = _same_challenge(expected)
+        try:
+            if replacement is None:
+                self._table.delete_item(Key=key, **condition)
+            else:
+                item = replacement.to_item()
+                item.update({**key, "entity": "otp"})
+                self._table.put_item(Item=_encode(item), **condition)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+                raise
+            return False
+        return True
+
+    def _get_consistent(self, key: dict[str, str]) -> dict[str, Any] | None:
+        item = self._table.get_item(Key=key, ConsistentRead=True).get("Item")
+        return _clean(item) if item else None
 
     # ---- tokens -----------------------------------------------------------
     def put_token(self, record: TokenRecord) -> None:

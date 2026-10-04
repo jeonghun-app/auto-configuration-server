@@ -334,6 +334,12 @@ Resources:
   TaskEgressToSmsc:
     Type: AWS::EC2::SecurityGroupEgress
     Condition: UseSmpp
+    # cfn-lint resolves SmppSmscCidr to its empty default, but this resource only
+    # exists with SmsProvider=smpp, where the SmppNeedsAnSmsc rule requires a value.
+    Metadata:
+      cfn-lint:
+        config:
+          ignore_checks: [W1030]
     Properties:
       GroupId: !Ref TaskSecurityGroup
       IpProtocol: tcp

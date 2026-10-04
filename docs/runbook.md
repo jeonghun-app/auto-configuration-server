@@ -189,8 +189,7 @@ SMPP_SECRET=$(aws cloudformation describe-stacks --region $REGION --stack-name $
   printf '%s' "$SMPP_PASSWORD" > "$f"
   aws secretsmanager put-secret-value --region "$REGION" --secret-id "$SMPP_SECRET" \
     --secret-string "file://$f"
-)
-aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
+) && aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
   --service rcs-acs-app-service --force-new-deployment
 ```
 

@@ -8,6 +8,12 @@ updates:
     groups:
       dev-dependencies:
         patterns: ["pytest*", "ruff", "mypy", "moto", "cfn-lint", "types-*"]
+    # FastAPI 0.142 records request query strings in OpenTelemetry spans
+    # unredacted once an SDK is present; held until telemetry is disabled
+    # explicitly (#29).
+    ignore:
+      - dependency-name: fastapi
+        versions: [">=0.142"]
 
   - package-ecosystem: github-actions
     directory: /

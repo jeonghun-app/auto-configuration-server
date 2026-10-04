@@ -2,21 +2,29 @@
 
 Each test here pins something the application relies on but does not implement
 itself: form parsing (python-multipart, Starlette), cookie and header emission
-(Starlette), the XML parser's refusal of hostile documents (lxml/libxml2) and the
-string form of the protocol enums. A future bump that changes any of these fails
-here rather than in production.
+(Starlette), the XML parser's refusal of hostile documents (lxml/libxml2),
+uvicorn's proxy-header rewrite of the client address and the string form of the
+protocol enums, the uvicorn command line the image runs and boto3's choice of
+DynamoDB endpoint. A future bump that changes any of these fails here rather than
+in production.
 """
 
 from __future__ import annotations
 
 import json
+import pathlib
+import re
 from collections.abc import Iterator
 from http.cookies import SimpleCookie
+from typing import Any
 
 import pytest
+from botocore.awsrequest import AWSResponse
 from fastapi.testclient import TestClient
 from lxml import etree
 from tests.conftest import ADMIN_TOKEN, TEST_IMSI, TEST_MSISDN, base_query
+from uvicorn.main import main as uvicorn_cli
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from acs.api.console import CSRF_COOKIE as CONSOLE_CSRF_COOKIE
 from acs.api.console import SESSION_COOKIE
@@ -27,8 +35,11 @@ from acs.config import Settings
 from acs.protocol.omacp import writer
 from acs.protocol.omadm import syncml
 from acs.protocol.vers import VersAction
+from acs.store import build_store
+from acs.store.dynamodb import DynamoDbStore
 from acs.store.memory import MemoryStore
 
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 FORM = {"content-type": "application/x-www-form-urlencoded"}
 
 
@@ -92,6 +103,151 @@ def test_a_parameter_repeated_across_query_and_body_is_refused(client: TestClien
     form = {str(k): str(v) for k, v in base_query().items()}
     response = client.post("/config", params={"IMSI": TEST_IMSI}, data=form)
     assert response.status_code == 400
+
+
+# --------------------------------------------- uvicorn proxy headers (Dockerfile)
+def _behind_uvicorn_proxy_headers(settings: Settings, store: MemoryStore) -> TestClient:
+    # The image runs uvicorn with --proxy-headers --forwarded-allow-ips "*", so
+    # request.client is rewritten from X-Forwarded-For before the app sees it.
+    # With every hop trusted, uvicorn picks the *left-most* entry, which the caller
+    # controls. Header enrichment must keep deciding trust on the right-most entry.
+    enriching = settings.model_copy(update={"trusted_proxy_cidrs": "10.0.0.0/8"})
+    # Starlette and uvicorn type the ASGI callable differently; both are ASGI 3.
+    inner = create_app(enriching, store)
+    app = ProxyHeadersMiddleware(inner, trusted_hosts="*")  # type: ignore[arg-type]
+    return TestClient(app)  # type: ignore[arg-type]
+
+
+def test_enrichment_trusts_the_right_most_forwarded_entry_behind_uvicorn(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    query = {k: v for k, v in base_query().items() if k != "IMSI"}
+    with _behind_uvicorn_proxy_headers(settings, seeded_store) as client:
+        response = client.get(
+            "/config",
+            params=query,
+            headers={
+                "X-3GPP-Intended-Identity": TEST_MSISDN,
+                "X-Forwarded-For": "203.0.113.9, 10.0.0.7",
+            },
+        )
+    assert response.status_code == 200
+    assert b"wap-provisioningdoc" in response.content
+
+
+def test_a_forged_left_most_forwarded_entry_does_not_enrich_behind_uvicorn(
+    settings: Settings, seeded_store: MemoryStore
+) -> None:
+    query = {k: v for k, v in base_query().items() if k != "IMSI"}
+    with _behind_uvicorn_proxy_headers(settings, seeded_store) as client:
+        response = client.get(
+            "/config",
+            params=query,
+            headers={
+                "X-3GPP-Intended-Identity": TEST_MSISDN,
+                "X-Forwarded-For": "10.0.0.7, 203.0.113.9",
+            },
+        )
+    assert b"wap-provisioningdoc" not in response.content
+    assert response.status_code == 511
+
+
+# ------------------------------------------- uvicorn command line (Dockerfile)
+def _image_command() -> list[str]:
+    dockerfile = (ROOT / "Dockerfile").read_text().replace("\\\n", " ")
+    match = re.search(r"^CMD (\[.*\])$", dockerfile, re.MULTILINE)
+    assert match, "the Dockerfile has no exec-form CMD"
+    command: list[str] = json.loads(match.group(1))
+    return command
+
+
+def test_the_image_command_line_is_accepted_by_the_installed_uvicorn() -> None:
+    # A renamed or removed option would otherwise surface only as a container that
+    # exits at start-up. The values are the ones the Dockerfile comments justify.
+    command = _image_command()
+    assert command[0] == "uvicorn"
+    params = uvicorn_cli.make_context("uvicorn", command[1:]).params
+    assert params["app"] == "acs.app:create_app"
+    assert params["factory"] is True
+    assert params["port"] == 8080
+    assert params["access_log"] is False
+    assert params["timeout_keep_alive"] == 65
+    assert params["proxy_headers"] is True
+    assert params["forwarded_allow_ips"] == "*"
+
+
+def test_the_lock_installs_no_alternative_http_or_event_loop_implementation() -> None:
+    # The image is verified on uvicorn's h11 protocol and the asyncio loop. With
+    # httptools or uvloop present, "--http auto" and "--loop auto" would switch to
+    # them without any change to the command line.
+    lock = (ROOT / "requirements.lock").read_text().lower()
+    names = {line.split("==")[0].strip() for line in lock.splitlines() if "==" in line}
+    assert "h11" in names
+    assert not names & {"httptools", "uvloop", "websockets", "wsproto"}
+
+
+# --------------------------------------------------- boto3 DynamoDB endpoint
+class _Body:
+    def stream(self, **_: Any) -> Iterator[bytes]:
+        yield b"{}"
+
+
+def _isolate_aws_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    for name in ("AWS_PROFILE", "AWS_ACCOUNT_ID_ENDPOINT_MODE", "AWS_SESSION_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    # Present in an ECS task's credentials; makes botocore prefer the account-ID
+    # endpoint unless an explicit endpoint is configured.
+    monkeypatch.setenv("AWS_ACCOUNT_ID", "111122223333")
+
+
+def _first_request_url(store: DynamoDbStore) -> str:
+    sent: list[str] = []
+
+    def capture(request: Any, **_: Any) -> AWSResponse:
+        sent.append(request.url)
+        return AWSResponse(request.url, 200, {}, _Body())
+
+    store._table.meta.client.meta.events.register("before-send", capture)
+    assert store.get_subscriber(TEST_IMSI) is None
+    assert sent
+    return sent[0]
+
+
+@pytest.mark.aws
+def test_the_configured_dynamodb_endpoint_is_used_even_with_aws_endpoint_variables(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    _isolate_aws_environment(monkeypatch, tmp_path)
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "http://global-override.invalid:1")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_DYNAMODB", "http://service-override.invalid:1")
+    monkeypatch.setenv("ACS_STORE_BACKEND", "dynamodb")
+    monkeypatch.setenv("ACS_DYNAMODB_ENDPOINT_URL", "http://dynamodb:8000")
+    store = build_store(Settings(_env_file=None))  # type: ignore[call-arg]
+    assert isinstance(store, DynamoDbStore)
+    assert _first_request_url(store) == "http://dynamodb:8000/"
+
+
+@pytest.mark.aws
+def test_without_a_configured_endpoint_dynamodb_is_reached_on_its_aws_endpoint(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    # botocore derives an account-ID endpoint from credentials that carry an
+    # account ID, so the task's egress must allow that name and not only
+    # dynamodb.<region>.amazonaws.com. Opting out restores the regional name.
+    _isolate_aws_environment(monkeypatch, tmp_path)
+    for name in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_DYNAMODB", "ACS_DYNAMODB_ENDPOINT_URL"):
+        monkeypatch.delenv(name, raising=False)
+    url = _first_request_url(DynamoDbStore("rcs-acs", "ap-northeast-2"))
+    assert url == "https://111122223333.ddb.ap-northeast-2.amazonaws.com/"
+
+    monkeypatch.setenv("AWS_ACCOUNT_ID_ENDPOINT_MODE", "disabled")
+    url = _first_request_url(DynamoDbStore("rcs-acs", "ap-northeast-2"))
+    assert url == "https://dynamodb.ap-northeast-2.amazonaws.com/"
 
 
 # ----------------------------------------------------------- cookies, headers

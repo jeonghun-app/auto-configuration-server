@@ -12,10 +12,14 @@ on:
 permissions:
   contents: read
 
-# Two pushes of the same tag must not race each other into the registry, and a
-# release half-way through publishing must not be cancelled.
+# One release at a time, across all tags. Whether a release moves "latest" and
+# "X.Y" is decided while it holds this lock, from the tags that exist then, so a
+# release delayed behind a newer one cannot move either backwards. A release
+# half-way through publishing is never cancelled. GitHub keeps only one pending
+# run per group: if a third tag is pushed while one runs and one waits, the
+# waiting run is cancelled and must be re-run (docs/releasing.md).
 concurrency:
-  group: release-${{ github.ref }}
+  group: release
   cancel-in-progress: false
 
 env:
@@ -28,13 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.tag.outputs.version }}
-      latest: ${{ steps.latest.outputs.latest }}
     steps:
       # Actions are pinned to a commit SHA rather than a tag: a tag can be moved.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history and tags: needed to confirm the tag is on main and to
-          # decide whether this release becomes "latest".
+          # Full history: needed to confirm the tag is on main.
           fetch-depth: 0
           persist-credentials: false
 
@@ -61,23 +63,6 @@ jobs:
             exit 1
           fi
 
-      - name: Decide whether this is the newest release
-        id: latest
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          # A patch to an older line (say v1.2.1 after v1.3.0) must not move
-          # "latest" backwards.
-          newest="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1)"
-          if [[ "$newest" == "$TAG" ]]; then
-            echo "latest=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "latest=false" >> "$GITHUB_OUTPUT"
-            echo "$TAG is not the newest tag ($newest); latest will not move"
-          fi
-
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
@@ -95,11 +80,28 @@ jobs:
       contents: read
       packages: write
     outputs:
-      digest: ${{ steps.build.outputs.digest }}
+      digest: ${{ steps.existing.outputs.digest || steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Decided here, not in verify: a re-run of this job, or a run that waited
+      # behind a newer release, must see the tags as they are now.
+      - name: Decide whether latest and X.Y move
+        id: channels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref' > tags.txt
+          python scripts/release_notes.py channels "$TAG" < tags.txt | tee -a "$GITHUB_OUTPUT"
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
@@ -111,7 +113,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # X.Y.Z is immutable: a deployment may already pin it. If it exists, this
+      # run publishes nothing and only the Release notes are (re)written.
+      - name: Refuse to overwrite an existing X.Y.Z
+        id: existing
+        env:
+          REF: ${{ env.IMAGE }}:${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          if out="$(docker buildx imagetools inspect "$REF" --format '{{json .Manifest}}' 2>&1)"; then
+            digest="$(jq -r .digest <<<"$out")"
+            echo "::warning::$REF already exists ($digest); not rebuilding or pushing"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          # A missing tag answers "not found"; a package that has never been
+          # published answers like an access denial. Either way nothing can be
+          # overwritten: the push below needs the same access. Anything else (a
+          # registry or network error) must not be read as absence.
+          elif grep -qiE 'not found|name unknown|manifest unknown|denied|403 forbidden' <<<"$out"; then
+            echo "$REF does not exist yet: $out"
+          else
+            echo "::error::could not tell whether $REF exists: $out"
+            exit 1
+          fi
+
       - id: meta
+        if: steps.existing.outputs.digest == ''
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         env:
           # Put the annotations on the multi-arch index too, which is what GHCR
@@ -123,8 +149,8 @@ jobs:
             latest=false
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ needs.verify.outputs.latest == 'true' }}
+            type=semver,pattern={{major}}.{{minor}},enable=${{ steps.channels.outputs.minor == 'true' }}
+            type=raw,value=latest,enable=${{ steps.channels.outputs.latest == 'true' }}
           labels: |
             org.opencontainers.image.title=GSMA RCS Auto Configuration Server
             org.opencontainers.image.description=RCC.14/RCC.07 OMA-CP ACS with an OMA-DM device management plane
@@ -138,6 +164,7 @@ jobs:
             org.opencontainers.image.version=${{ needs.verify.outputs.version }}
 
       - id: build
+        if: steps.existing.outputs.digest == ''
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -179,9 +206,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          LATEST: ${{ needs.verify.outputs.latest }}
         run: |
           set -euo pipefail
+          # Re-decided here too: re-running only this job reuses the image job's
+          # old outputs, which may predate a newer release.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/v" \
+            --jq '.[].ref' > tags.txt
+          LATEST="$(python scripts/release_notes.py channels "$TAG" < tags.txt \
+            | sed -n 's/^latest=//p')"
+          echo "latest=$LATEST"
           # Re-running the workflow for the same tag updates the notes rather
           # than failing on an existing release.
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

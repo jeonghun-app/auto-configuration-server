@@ -140,7 +140,9 @@ def test_the_notes_carry_the_pull_command_for_the_exact_version(tmp_path: pathli
     body = rn.notes("2.0.0", tmp_path, image="ghcr.io/o/r", digest="sha256:abc")
     assert "docker pull ghcr.io/o/r:2.0.0" in body
     assert "docker pull ghcr.io/o/r@sha256:abc" in body
-    assert "`2.0`" in body
+    # X.Y and latest move to later releases; the notes must not claim them.
+    assert "latest" not in body
+    assert "`2.0`" not in body
 
 
 def test_the_cli_exits_non_zero_with_a_reason(tmp_path: pathlib.Path) -> None:
@@ -177,3 +179,87 @@ def test_every_released_version_has_a_compare_link() -> None:
     assert versions[0] == "Unreleased"
     for name in versions:
         assert any(line.startswith(f"[{name}]: https://") for line in text.splitlines()), name
+
+
+FENCED = """## [2.0.0] — 2026-09-01
+
+### Changed
+
+- The heading format is now:
+
+  ```markdown
+  ## [1.2.3] — 2026-01-01
+  [1.2.3]: https://example.org
+  ```
+
+~~~~text
+## not a heading either
+~~~
+still inside the tilde fence
+~~~~
+
+- And this line is still part of 2.0.0.
+
+## [1.0.0] — 2026-08-30
+
+First release.
+
+```bash
+## [2.0.0] — a fenced copy that must not count as a second section
+```
+"""
+
+
+def test_a_heading_inside_a_code_fence_does_not_end_the_section() -> None:
+    body = rn.extract_section(FENCED, "2.0.0")
+    assert "## [1.2.3] — 2026-01-01" in body
+    assert "[1.2.3]: https://example.org" in body
+    assert "## not a heading either" in body
+    assert "still inside the tilde fence" in body
+    assert body.rstrip().endswith("And this line is still part of 2.0.0.")
+    assert "First release" not in body
+
+
+def test_a_heading_inside_a_code_fence_is_not_a_section() -> None:
+    assert "First release." in rn.extract_section(FENCED, "1.0.0")
+    with pytest.raises(rn.ReleaseError, match="no '## \\[1.2.3\\]' section"):
+        rn.extract_section(FENCED, "1.2.3")
+
+
+def test_an_unclosed_code_fence_is_refused() -> None:
+    text = "## [1.0.0] — 2026-01-01\n\n```\n## [0.9.0]\n\n## [0.9.0] — 2025-01-01\n\nOld.\n"
+    with pytest.raises(rn.ReleaseError, match="unclosed code fence opened at line 3"):
+        rn.extract_section(text, "1.0.0")
+
+
+TAGS = ["v1.3.0", "v1.4.0", "v1.4.1", "v1.2.9", "v2.0.0-rc.1", "not-a-version", "refs/tags/v1.3.2"]
+
+
+@pytest.mark.parametrize(
+    ("tag", "latest", "minor"),
+    [
+        ("v1.4.1", True, True),
+        ("v1.4.0", False, False),  # re-run or delayed behind 1.4.1
+        ("v1.3.2", False, True),  # a patch to an older line keeps its own X.Y
+        ("v1.3.0", False, False),
+        ("v1.5.0", True, True),  # not yet in the list: the tag being published
+        ("v1.4.2", True, True),
+    ],
+)
+def test_latest_and_the_minor_tag_only_move_forward(tag: str, latest: bool, minor: bool) -> None:
+    assert rn.channels(tag, TAGS) == (latest, minor)
+
+
+def test_a_pre_release_tag_never_counts_as_newer() -> None:
+    assert rn.channels("v1.9.9", ["v2.0.0-rc.1", "v10.0.0.1"]) == (True, True)
+
+
+def test_the_channels_cli_prints_github_outputs() -> None:
+    result = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "release_notes.py"), "channels", "v1.4.0"],
+        input="refs/tags/v1.4.1\nrefs/tags/v1.4.0\n",
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout == "latest=false\nminor=false\n"

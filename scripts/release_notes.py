@@ -8,10 +8,13 @@ mean the same thing in both places.
     python scripts/release_notes.py verify v1.3.0
     python scripts/release_notes.py notes 1.3.0 [--image ghcr.io/owner/repo]
         [--digest sha256:...] [--repo-url https://github.com/owner/repo]
+    git tag -l | python scripts/release_notes.py channels v1.3.0
 
 ``verify`` fails unless the tag is ``vMAJOR.MINOR.PATCH``, equals the version in
 ``pyproject.toml`` and ``src/acs/__init__.py``, and ``CHANGELOG.md`` has a non-empty
-section for it. ``notes`` prints that section.
+section for it. ``notes`` prints that section. ``channels`` reads every existing
+tag on stdin and prints, in ``$GITHUB_OUTPUT`` form, whether the tag is the newest
+release overall (``latest``) and the newest patch of its minor line (``minor``).
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ _HEADING_RE = re.compile(r"^## \[(?P<name>[^\]]+)\](?:\s+[—–-]\s+\S.*)?\s*$"
 # Keep a Changelog ends with link reference definitions; they belong to no section.
 _LINK_DEF_RE = re.compile(r"^\[[^\]]+\]:\s+\S+")
 _INIT_VERSION_RE = re.compile(r'^__version__\s*=\s*"(?P<version>[^"]+)"', re.MULTILINE)
+# A fenced code block opens with three or more backticks or tildes, indented by at
+# most three spaces, and closes with at least as many of the same character.
+_FENCE_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})")
 # A relative Markdown link: ](path) where path has no scheme and is not an anchor.
 _RELATIVE_LINK_RE = re.compile(r"\]\((?![a-zA-Z][a-zA-Z0-9+.-]*:|#|/)(?P<path>[^)\s]+)\)")
 
@@ -68,11 +74,48 @@ def package_version(init_text: str) -> str:
     return match.group("version")
 
 
+def _outside_fences(lines: list[str]) -> list[bool]:
+    """For each line, whether it is Markdown structure rather than code.
+
+    A ``## `` or ``[x]: url`` line inside a code block is example text; treating it
+    as a heading would cut a section short and publish truncated release notes.
+    """
+    result: list[bool] = []
+    open_fence: str | None = None
+    opened_at = 0
+    for number, line in enumerate(lines, start=1):
+        match = _FENCE_RE.match(line)
+        if open_fence is None:
+            if match is not None:
+                open_fence = match.group("fence")
+                opened_at = number
+                result.append(False)
+            else:
+                result.append(True)
+            continue
+        result.append(False)
+        if (
+            match is not None
+            and match.group("fence")[0] == open_fence[0]
+            and len(match.group("fence")) >= len(open_fence)
+            and not line.strip().lstrip(open_fence[0])
+        ):
+            open_fence = None
+    if open_fence is not None:
+        # Markdown would run the block to the end of the file, swallowing every
+        # later section; refuse rather than publish that.
+        raise ReleaseError(f"CHANGELOG.md has an unclosed code fence opened at line {opened_at}")
+    return result
+
+
 def extract_section(changelog_text: str, version: str) -> str:
     """Return the body of the ``## [version]`` section, without its heading."""
     lines = changelog_text.splitlines()
+    structural = _outside_fences(lines)
     start: int | None = None
     for index, line in enumerate(lines):
+        if not structural[index]:
+            continue
         heading = _HEADING_RE.match(line)
         if heading is not None and heading.group("name") == version:
             if start is not None:
@@ -83,6 +126,8 @@ def extract_section(changelog_text: str, version: str) -> str:
 
     end = len(lines)
     for index in range(start, len(lines)):
+        if not structural[index]:
+            continue
         if lines[index].startswith("## ") or _LINK_DEF_RE.match(lines[index]):
             end = index
             break
@@ -111,9 +156,34 @@ def image_block(image: str, version: str, digest: str | None = None) -> str:
     return (
         "\n## Container image\n\n"
         f"```bash\n{pull}```\n\n"
-        f"Also tagged `{version.rsplit('.', 1)[0]}`. Built for `linux/amd64` and "
-        "`linux/arm64`, with SBOM and provenance attestations attached.\n"
+        # No X.Y or latest here: they move on to later releases, the notes do not.
+        "Built for `linux/amd64` and `linux/arm64`, with SBOM and provenance "
+        "attestations attached.\n"
     )
+
+
+def _key(version: str) -> tuple[int, int, int]:
+    major, minor, patch = (int(part) for part in version.split("."))
+    return major, minor, patch
+
+
+def channels(tag: str, existing: list[str]) -> tuple[bool, bool]:
+    """Return (newest overall, newest patch in its minor line) for ``tag``.
+
+    Decided from the tags that exist when the image is about to be published, not
+    when the tag was verified: a release delayed behind a newer one, or re-run
+    after it, must not move ``latest`` or ``X.Y`` backwards. Anything that is not a
+    plain ``vX.Y.Z`` tag is ignored.
+    """
+    current = _key(version_from_tag(tag))
+    released = [current]
+    for name in existing:
+        match = TAG_RE.match(name.strip().removeprefix("refs/tags/"))
+        if match is not None:
+            released.append(_key(match.group("version")))
+    newest = max(released)
+    newest_in_line = max(v for v in released if v[:2] == current[:2])
+    return current == newest, current == newest_in_line
 
 
 def verify(tag: str, root: pathlib.Path) -> str:
@@ -159,6 +229,11 @@ def main(argv: list[str] | None = None) -> int:
     p_notes.add_argument("--digest", help="image index digest to show a pinned pull for")
     p_notes.add_argument("--repo-url", help="rewrite relative links against this repository")
 
+    p_channels = sub.add_parser(
+        "channels", help="decide latest and X.Y from the existing tags on stdin"
+    )
+    p_channels.add_argument("tag", help="for example v1.3.0")
+
     args = parser.parse_args(argv)
     try:
         if args.command == "verify":
@@ -167,6 +242,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{args.tag}: pyproject.toml, src/acs/__init__.py and CHANGELOG.md agree "
                 f"on {version}"
             )
+        elif args.command == "channels":
+            latest, minor = channels(args.tag, sys.stdin.read().splitlines())
+            print(f"latest={str(latest).lower()}")
+            print(f"minor={str(minor).lower()}")
         else:
             sys.stdout.write(notes(args.version, args.root, args.image, args.repo_url, args.digest))
     except ReleaseError as exc:

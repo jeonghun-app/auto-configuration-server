@@ -251,6 +251,11 @@ previous image is still in ECR. The service deploys with
 `MinimumHealthyPercent: 100` and the circuit breaker enabled, so a bad rollout
 rolls itself back.
 
+From a release later than 1.4.x, roll back no further than 1.4.x. 1.3 counts the
+daily OTP cap from `OTPSEND#` rows, which later releases no longer write, so it
+would not count their sends (see
+[ADR 0002](adr/0002-datastore.md#amendment-legacy-send-rows-retired)).
+
 ## Adding a provisioning parameter
 
 1. Add the entry to `src/acs/catalog/omacp/base.yaml` (or a profile overlay).

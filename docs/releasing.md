@@ -235,12 +235,13 @@ scripts/deploy.sh --allowed-cidr <cidr> --certificate-arn <arn> --image-tag GOOD
 Two cautions:
 
 - `deploy.sh` passes every application-stack parameter it knows on every run
-  (`ImageUri`, `AllowedCidr`, `Environment`, `DesiredCount`, `SmsProvider`,
-  `SmsOriginationIdentity`, the five `Smpp*` parameters, `CertificateArn`), so a
-  parameter left out of a rollback command reverts to the script's default: a
-  missing `--certificate-arn` turns HTTPS off, and a missing `--sms-provider smpp`
-  switches an SMPP stack back to `eum`. Read the current values first, and repeat
-  them:
+  (`ImageUri`, `AllowedCidr`, `Environment`, `DesiredCount`, `FixedEgress`,
+  `SmsProvider`, `SmsOriginationIdentity`, the thirteen `Smpp*` parameters,
+  `CertificateArn`), so a parameter left out of a rollback command reverts to the
+  script's default: a missing `--certificate-arn` turns HTTPS off, a missing
+  `--sms-provider smpp` switches an SMPP stack back to `eum`, and a missing
+  `--fixed-egress` releases the Elastic IPs an SMSC allow-lists. Read the current
+  values first, and repeat them:
 
   ```bash
   aws cloudformation describe-stacks --region <region> --stack-name rcs-acs-app \

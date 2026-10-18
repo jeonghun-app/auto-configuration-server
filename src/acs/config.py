@@ -8,6 +8,7 @@ Manager, with no configuration files baked into the image.
 from __future__ import annotations
 
 import functools
+import ssl
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
@@ -130,6 +131,11 @@ class Settings(BaseSettings):
     """SMPP sends the password in clear. Turn off only on a private link to the SMSC."""
     smpp_tls_ca_file: str = ""
     """CA bundle for an SMSC certificate from an operator private CA."""
+    smpp_tls_ca_pem: SecretStr = SecretStr("")
+    """The same CA bundle as PEM text, for a container whose root filesystem is
+    read-only: the stack injects it from a Secrets Manager secret. A CA bundle is
+    not confidential, but it is held as a secret so it never reaches a repr or a
+    log line; a mistaken one may carry a private key."""
     smpp_timeout_seconds: float = Field(default=10.0, gt=0, le=60, allow_inf_nan=False)
     """Per response. Capped because the request thread waits on it while the
     client is waiting for its HTTP answer."""
@@ -213,9 +219,39 @@ class Settings(BaseSettings):
             problems.append("smpp_password must be at most 8 characters (SMPP 3.4).")
         if not all(" " <= ch <= "~" for ch in password):
             problems.append("smpp_password must be printable ASCII.")
+        ca_pem = self.smpp_tls_ca_pem.get_secret_value()
+        if ca_pem:
+            if self.smpp_tls_ca_file:
+                problems.append("set smpp_tls_ca_file or smpp_tls_ca_pem, not both.")
+            problems.extend(_ca_pem_problems(ca_pem))
         if self.otp_length < 4 or self.otp_length > 10:
             problems.append("otp_length must be between 4 and 10.")
         return problems
+
+
+def _ca_pem_problems(pem: str) -> list[str]:
+    """Return why ``pem`` cannot serve as the SMSC trust anchors, if it cannot.
+
+    Checked at startup in every environment, because otherwise the first sign
+    of a broken bundle is every OTP answering 503. Neither message quotes the
+    value, and the ssl error is not passed on either.
+    """
+    if "PRIVATE KEY-----" in pem:
+        # ssl would load the certificates and ignore the key, but the key has then
+        # been copied into a secret and an environment variable meant for public data.
+        return ["smpp_tls_ca_pem contains a private key; it must hold CA certificates only."]
+    unloadable = [
+        "smpp_tls_ca_pem is not a PEM certificate bundle ssl can load. The secret "
+        "must be plain PEM text, not key/value JSON or escaped newlines."
+    ]
+    # ssl refuses a non-ASCII str with TypeError, before it looks at the content.
+    if not pem.isascii():
+        return unloadable
+    try:
+        ssl.create_default_context(cadata=pem)
+    except ssl.SSLError:
+        return unloadable
+    return []
 
 
 @functools.lru_cache(maxsize=1)

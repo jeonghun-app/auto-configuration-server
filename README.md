@@ -75,7 +75,7 @@ Every backing service is an AWS managed service.
 | Compute | ECS Fargate |
 | Ingress and TLS | Application Load Balancer + ACM |
 | State | DynamoDB (single table, TTL-expired OTP challenges and DM sessions) |
-| Secrets | Secrets Manager (admin token, PII hash key, and the SMSC password with SMPP) |
+| Secrets | Secrets Manager (admin token, PII hash key, and the SMSC password with SMPP; an SMSC CA bundle you create) |
 | Logs | CloudWatch Logs (structured JSON) |
 | Metrics | CloudWatch, via embedded metric format on stdout — no `PutMetricData` |
 | SMS | AWS End User Messaging SMS or Amazon SNS for text OTP; an operator SMSC over SMPP 3.4 for port-addressed OTP |
@@ -320,6 +320,7 @@ All settings come from `ACS_`-prefixed environment variables; see
 | `ACS_STORE_BACKEND` | `memory` | Refused in staging/prod: in-memory OTP state breaks the moment there is more than one task |
 | `ACS_SMS_PROVIDER` | `mock` | Refused in staging/prod. `eum` or `sns` send text OTP only; `smpp` is the only provider that can send a port-addressed OTP |
 | `ACS_SMPP_TLS` | `true` | SMPP sends the password in clear; turn TLS off only on a private link to the SMSC. Host, `system_id` and password are required in staging/prod |
+| `ACS_SMPP_TLS_CA_PEM` | *(empty)* | An operator private CA bundle as PEM text, for the read-only container; the stack injects it from Secrets Manager. An unloadable bundle refuses to start |
 | `ACS_SMPP_TIMEOUT_SECONDS` | `10` | Per SMSC response, at most 60: the handset's HTTP request waits on it |
 
 Startup validation refuses to boot on a configuration that would be unsafe for

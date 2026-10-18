@@ -151,8 +151,9 @@ cannot originate the trigger.
   the next.
 - **Tasks run in public subnets with public IPs** in the default CloudFormation
   stack, so images can be pulled from ECR without a NAT gateway. No inbound rule
-  admits anything but the load balancer. The private-subnet variant is described
-  in [aws-deployment.md](aws-deployment.md) and costs more.
+  admits anything but the load balancer. `FixedEgress` moves them into private
+  subnets behind NAT gateways with fixed addresses, at an hourly cost; see
+  [aws-deployment.md](aws-deployment.md#fixed-egress-address).
 - **No WAF by default.** A rate-based rule is recommended before opening the
   service to the internet; the OTP endpoint costs money to abuse.
 - **HTTP without a certificate.** `scripts/deploy.sh` warns loudly. Serving RCC.14

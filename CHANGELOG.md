@@ -5,6 +5,45 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+An operator SMSC that allow-lists source addresses, or presents a certificate
+from a private CA, can now be used from the CloudFormation stack (#31).
+
+### Added
+
+- **Fixed egress address.** `FixedEgress` (`deploy.sh --fixed-egress`) is `none`
+  by default, which changes nothing. `single` puts the tasks behind one NAT gateway
+  with an Elastic IP; `per-az` puts one in each AZ, so an AZ outage does not stop
+  egress in the other. The app subnets become private, the tasks lose their public
+  IPs, and the addresses are the `EgressIps` output, for the SMSC allow-list. A
+  free S3 gateway endpoint keeps image pulls off the NAT gateway's per-GB charge.
+  NAT gateways are billed hourly; `docs/aws-deployment.md` gives the cost and
+  explains why `per-az` is the production choice. Turning it off or deleting the
+  stack releases the addresses.
+- **SMSC CA bundle from Secrets Manager.** `ACS_SMPP_TLS_CA_PEM` takes the bundle
+  as PEM text, because the task's root filesystem is read-only. On the stack,
+  `SmppTlsCaSecretArn` (`--smpp-tls-ca-secret-arn`) names a secret you create;
+  ECS injects it, and the execution role may read that one ARN only. A bundle ssl
+  cannot load, one carrying a private key, or setting it together with
+  `ACS_SMPP_TLS_CA_FILE` refuses to start, in every environment, without quoting
+  the value.
+- The remaining SMPP settings are stack parameters and `deploy.sh` flags:
+  `SmppSystemType`, `SmppSourceAddr`, `SmppSourceAddrTon`, `SmppSourceAddrNpi`,
+  `SmppDestAddrTon`, `SmppDestAddrNpi` and `SmppTimeoutSeconds`. Their defaults
+  are the application's, so a stack updated without them behaves as before.
+
+### Changed
+
+- `SmppSmscCidr` takes up to four comma-separated ranges (an SMSC pair needs
+  two), each given its own egress rule. The parameter keeps its name and type and a
+  single range is still valid, so no migration is needed; it stays a `String`
+  with a pattern, rather than a `CommaDelimitedList`, so that a fifth range is
+  refused instead of silently dropped. `--smpp-cidr` accepts the same list.
+- Updating an existing stack adds the new SMPP environment variables to the task
+  definition, so the service rolls its tasks once, with unchanged behaviour.
+- `deploy.sh` passes the new parameters on every run. A rollback must repeat
+  `--fixed-egress` and the new `--smpp-*` flags, or they reset to their defaults;
+  for `--fixed-egress` that releases the Elastic IPs.
+
 ## [1.4.0] — 2026-10-04
 
 Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM

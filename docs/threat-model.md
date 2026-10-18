@@ -144,6 +144,30 @@ deploy script warns that the service is HTTP-only. Responses carry
 Residual: the template permits an HTTP-only deployment. Deliberate, so the stack
 can be exercised without a domain, and warned about at deploy time.
 
+### T13 — Impersonating the SMSC
+
+*Stand between the tasks and the operator SMSC, collect the SMPP password, and
+read or suppress every OTP.*
+
+SMPP sends the password in clear, so TLS to the SMSC is on by default and the
+certificate is verified against the public CAs, or, with `SmppTlsCaSecretArn`,
+against the operator's private CA bundle only. The tasks may open `SmppPort` only
+to the `SmppSmscCidr` ranges. With `FixedEgress` the SMSC can also allow-list the
+stack's Elastic IPs, so a stolen password alone does not let another host bind.
+
+The CA bundle is a trust anchor, so write access to its secret is as sensitive as
+the SMPP password: whoever can put a CA there can present a certificate the tasks
+accept. The secret is owned by the operator of the stack, not created by it; the
+execution role may read that one ARN and nothing else, and the tasks only read it.
+A bundle that cannot be loaded, or that carries a private key, stops the task at
+startup with an error that does not quote it, rather than leaving TLS to fail on
+the first OTP. `tests/test_qa_smpp_tls.py` covers the PEM path, an untrusted SMSC
+certificate, and each refusal.
+
+Residual: the `FixedEgress` addresses are released with the stack or when the
+option is turned off, and AWS may hand a released address to another account.
+Ask the operator to remove it from the allow-list when that happens.
+
 ## Explicitly accepted residual risks
 
 1. Response timing may distinguish a known from an unknown subscriber.
@@ -154,6 +178,8 @@ can be exercised without a domain, and warned about at deploy time.
 6. GBA is not real, so a client that only supports GBA cannot be provisioned.
 7. 91 of 116 OMA-CP parameters are not cross-checked against a licensed spec
    edition, so a name could be wrong and a handset would silently ignore it.
+8. A released `FixedEgress` address left on an SMSC allow-list could be reused by
+   another AWS account; removing it is a step agreed with the operator.
 
 ## Reporting
 

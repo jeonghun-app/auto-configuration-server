@@ -5,6 +5,37 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Removed
+
+- **The legacy `OTPSEND#<msisdn>` send rows.** OTP issue no longer writes a row
+  per send next to the `OTPQUOTA#<msisdn>` item, and no longer queries those rows
+  on every quota check. The quota item is now the only source of the daily cap,
+  in the DynamoDB store as in the in-memory one. The extra row and query existed
+  only so that 1.3 and 1.4 tasks shared one count during a rolling deployment
+  (#28). An OTP issue that reaches the quota check makes one `Query` fewer, and
+  its transaction writes two items instead of three. No IAM action is added or
+  removed: `Query` is still used by the admin listings and the mock SMS outbox.
+- Rows already in a table are inert and need no cleanup. Every release that
+  wrote them (1.0.0 to 1.4.x) set `expires_at` to the send time plus 24 hours,
+  and the stack has declared `expires_at` as the table's TTL attribute since
+  1.0.0, so DynamoDB deletes them itself, usually within a few days of expiry.
+  Nothing reads them in the meantime.
+
+### Upgrade notes
+
+- **Upgrade from 1.4.x only.** Rolling from 1.3.x directly to this release is
+  unsupported. 1.3 tasks count the daily OTP cap from `OTPSEND#` rows, which the
+  new tasks neither write nor read, so during the rollout each version ignores
+  the other's sends and one MSISDN can receive up to twice the cap. Deploy 1.4.x
+  first, and keep it running for at least 24 hours after the last 1.3 task
+  stops: 1.4 carries a 1.3 send into the quota item only when it next checks
+  that MSISDN, and after 24 hours no 1.3 send is left to count.
+- **Rolling from 1.4.x, and back to it, keeps the cap.** 1.4 tasks still write
+  and read the legacy rows, but both versions count the quota item and update it
+  in the same versioned, conditional transaction, so the cap holds across a
+  mixed deployment and daily counts survive a rollback to 1.4.x. Do not roll
+  back to 1.3.x: it would not count any send made since the upgrade.
+
 ## [1.4.0] — 2026-10-04
 
 Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM

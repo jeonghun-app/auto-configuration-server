@@ -1,6 +1,8 @@
 # ADR 0002 — DynamoDB as the only production store
 
-**Status:** accepted; amended by issue #11 (see [Amendment](#amendment-atomic-otp-issue-and-consumption))
+**Status:** accepted; amended by issue #11 (see
+[Amendment](#amendment-atomic-otp-issue-and-consumption)) and issue #28 (see
+[Amendment](#amendment-legacy-send-rows-retired))
 
 ## Context
 
@@ -27,7 +29,7 @@ development and unit tests, and is refused in staging and production at startup.
 SUB#<imsi>       META      subscriber record          gsi1pk=ENTITY#subscriber
 MSISDN#<msisdn>  SUB       reverse index -> imsi
 OTP#<msisdn>     CHAL      pending challenge          TTL
-OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (merged with OTPQUOTA#, dual-written until #28)
+OTPSEND#<msisdn> <epoch>   send audit for quotas      TTL   (replaced by OTPQUOTA#; not written since #28)
 TOKEN#<sha256>   META      token                      gsi1pk=TOKENIMSI#<imsi>, TTL
 DEV#<device_id>  META      managed device             gsi1pk=ENTITY#device
 DMSESS#<sid>     META      DM session state           TTL
@@ -70,8 +72,8 @@ validation refuses it outside development.
   not delete subscriber data.
 - There is no cross-item transaction. Nothing in the current flows needs one; OTP
   consumption is a single-item update.
-  *(Superseded by the amendment below: OTP issue now uses one transaction,
-  including a legacy send row until #28.)*
+  *(Superseded by the amendment below: OTP issue now uses one transaction over
+  the challenge and the quota item.)*
 
 ## Amendment: atomic OTP issue and consumption
 
@@ -134,14 +136,16 @@ verification that loses five rounds is not verified.
   `TransactWriteItems` needs no IAM action of its own; it is authorised by the
   per-item `PutItem` already granted on the table.
 - Every cap, cooldown and attempt limit holds across tasks, not just within one.
-- **Daily cap across the deployment.** `issue_otp` merges the quota's send
-  history with that MSISDN's `OTPSEND#` rows of the last 24 hours, read with a
+- **Daily cap across the deployment.** *(Superseded by the amendment for #28
+  below: the quota item is the only source.)* `issue_otp` merges the quota's
+  send history with that MSISDN's `OTPSEND#` rows of the last 24 hours, read with a
   consistent `Query` on the row timestamps. This seeds a missing quota item and
   includes legacy sends made after it was created, so the daily count carries
   over the deployment instead of restarting at zero. The resend cooldown is
   unaffected because it is read from the challenge.
-- **Mixed versions.** The atomic limit holds once every task runs 1.4.0; during a
-  rolling deployment the 1.3 tasks' non-atomic check still applies, and
+- **Mixed versions.** *(Superseded by the amendment for #28 below: no legacy
+  row is written or read.)* The atomic limit holds once every task runs 1.4.0;
+  during a rolling deployment the 1.3 tasks' non-atomic check still applies, and
   dual-writing lets them see the new tasks' sends. While 1.4.x is current,
   `issue_otp` also writes the legacy `OTPSEND#<msisdn>` row (1.3's key,
   attributes and TTL) as a third `Put` in the same transaction, so 1.3's `Query`
@@ -156,3 +160,53 @@ verification that loses five rounds is not verified.
   stays rolling. The list is bounded by the cap.
 - moto applies requests without locking, so the concurrency tests serialise
   moto's request handling to model DynamoDB's per-request atomicity.
+
+## Amendment: legacy send rows retired
+
+**Status:** accepted (issue #28)
+
+### Context
+
+1.4.x kept the `OTPSEND#<msisdn>` rows alive for one purpose: a rolling
+deployment from 1.3, whose tasks count the daily cap from those rows. Every 1.4
+send wrote one as a third `Put` in the issue transaction, and every 1.4 quota
+check queried them. 1.4.0 is released, so after it no deployment needs to run a
+1.3 task next to a current one, and the rows only cost a `Query` per check, a
+third transactional write per send, and a second source the cap could be
+counted from.
+
+### Decision
+
+`issue_otp` reads and writes only the challenge and `OTPQUOTA#<msisdn>`. It
+neither writes nor queries `OTPSEND#` rows, and `MemoryStore` keeps a single send
+list as before. The supported upgrade path to the release after 1.4 (1.5.0) is
+through 1.4.x, run for at least 24 hours after the last 1.3 task stops: by then
+1.4 has carried every 1.3 send that still counts into the quota item, or the
+send has aged out of the window.
+
+### Alternatives
+
+**Keep the dual write.** Rejected: it serves only 1.3 tasks, costs on every send,
+and leaves a second record whose rules, not the quota's, a reader has to reason
+about.
+
+**Stop writing but keep reading.** Rejected: a 1.3 task still would not see the
+new tasks' sends, so a direct rolling upgrade from 1.3 would still not hold the
+cap, while the `Query` stays on every check.
+
+**Delete the existing rows.** Rejected: TTL already removes them, and finding
+them needs a table `Scan`, which the task role does not grant.
+
+### Consequences
+
+- The quota item is the only source of the daily cap, and its version condition
+  covers every send. A mixed 1.4/later deployment still holds the cap: 1.4 tasks
+  also count and update the quota item in the same conditional transaction, and
+  their extra legacy row is ignored by later tasks.
+- Rolling from 1.3.x directly to a later release is unsupported: each version
+  would ignore the other's sends. So is rolling back to 1.3.x from one.
+- Rows left in a table are inert. Every release that wrote them (1.0.0 to 1.4.x)
+  set `expires_at` to the send time plus 24 hours, and `expires_at` is the
+  table's TTL attribute, so DynamoDB deletes them on its own.
+- Revisit only if a release again has to share the daily cap with a version that
+  stores it differently; then dual-write for one release, as 1.4 did.

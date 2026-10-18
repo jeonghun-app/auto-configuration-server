@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import dataclasses
 import threading
-import time
 from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
 
@@ -389,128 +388,81 @@ def test_a_real_condition_failure_reports_conditional_check_failed(
     assert "ConditionalCheckFailed" in reasons
 
 
-# --------------------------------------------------- legacy quota migration
-@pytest.mark.aws
-def test_the_first_quota_item_is_seeded_from_legacy_send_rows(
-    dynamo_store: DynamoDbStore,
-) -> None:
-    # Rows in the format written before OTPQUOTA# existed: two within the last
-    # day, one older. A cap of three leaves room for exactly one more send.
-    for stamp in (NOW - 90000, NOW - 3600, NOW - 60):
-        dynamo_store._table.put_item(
-            Item={
-                "pk": f"OTPSEND#{TEST_MSISDN}",
-                "sk": str(stamp).zfill(12),
-                "entity": "otp_send",
-                "expires_at": stamp + 86400,
-            }
-        )
-    assert dynamo_store.issue_otp(challenge(), 0, 3, NOW) is None
-    refused = dynamo_store.issue_otp(challenge(NOW + 1, otp_hash="h2"), 0, 3, NOW + 1)
-    assert refused == OtpIssueRefused("daily_quota", 3600)
+# ------------------------------------------------- legacy send rows (#28)
+# 1.0 to 1.4.x also recorded each send as an OTPSEND#<msisdn> row, and 1.4.x
+# counted those rows so that 1.3 tasks in a rolling deployment shared the cap.
+# Rows still in a table expire on their TTL; nothing may read or write them.
+def legacy_send_row(stamp: int) -> dict[str, object]:
+    """An ``OTPSEND#`` row exactly as 1.0 to 1.4.x wrote it."""
+    return {
+        "pk": f"OTPSEND#{TEST_MSISDN}",
+        "sk": str(stamp).zfill(12),
+        "entity": "otp_send",
+        "expires_at": stamp + 86400,
+    }
+
+
+def legacy_send_rows(store: DynamoDbStore) -> list[dict[str, Any]]:
+    from boto3.dynamodb.conditions import Key
+
+    response = store._table.query(KeyConditionExpression=Key("pk").eq(f"OTPSEND#{TEST_MSISDN}"))
+    return list(response["Items"])
 
 
 @pytest.mark.aws
-def test_legacy_sends_after_the_quota_was_created_still_count_towards_the_daily_cap(
+def test_a_send_is_recorded_in_the_quota_item_and_writes_no_legacy_row(
     dynamo_store: DynamoDbStore,
 ) -> None:
-    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
-    legacy_time = NOW + 61
-    dynamo_store._table.put_item(
-        Item={
-            "pk": f"OTPSEND#{TEST_MSISDN}",
-            "sk": str(legacy_time).zfill(12),
-            "entity": "otp_send",
-            "expires_at": legacy_time + 86400,
-        }
-    )
-    later = legacy_time + 61
-    refused = dynamo_store.issue_otp(challenge(later, otp_hash="h3"), 60, 2, later)
-    assert refused == OtpIssueRefused("daily_quota", 3600)
-    stored = dynamo_store.get_otp(TEST_MSISDN)
-    assert stored is not None and stored.otp_hash == "h1"
-
-
-@pytest.mark.aws
-def test_dual_written_sends_are_not_counted_twice(
-    dynamo_store: DynamoDbStore,
-) -> None:
-    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
+    assert dynamo_store.issue_otp(challenge(), 60, 5, NOW) is None
     later = NOW + 61
-    assert dynamo_store.issue_otp(challenge(later, otp_hash="h2"), 60, 2, later) is None
-    refused = dynamo_store.issue_otp(challenge(later + 61), 60, 2, later + 61)
-    assert refused == OtpIssueRefused("daily_quota", 3600)
-
-
-def send_as_1_3(store: DynamoDbStore, sent: OtpChallenge) -> None:
-    """Write what 1.3's create_challenge writes: put_otp, then record_otp_send."""
-    item = sent.to_item()
-    item.update({"pk": f"OTP#{sent.msisdn}", "sk": "CHAL", "entity": "otp"})
-    store._put(item)
-    store._table.put_item(
-        Item={
-            "pk": f"OTPSEND#{sent.msisdn}",
-            "sk": str(sent.created_at).zfill(12),
-            "entity": "otp_send",
-            "expires_at": sent.created_at + 86400,
-        }
-    )
-
-
-@pytest.mark.aws
-def test_a_1_3_send_between_two_1_4_sends_holds_the_cooldown_then_the_daily_cap(
-    dynamo_store: DynamoDbStore,
-) -> None:
-    assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
-    send_as_1_3(dynamo_store, challenge(NOW + 61, otp_hash="h13"))
-    soon = NOW + 62
-    assert dynamo_store.issue_otp(challenge(soon, otp_hash="h3"), 60, 2, soon) == (
-        OtpIssueRefused("cooldown", 59)
-    )
-    later = NOW + 200
-    assert dynamo_store.issue_otp(challenge(later, otp_hash="h3"), 60, 2, later) == (
-        OtpIssueRefused("daily_quota", 3600)
-    )
-    stored = dynamo_store.get_otp(TEST_MSISDN)
-    assert stored is not None and stored.otp_hash == "h13"
-
-
-@pytest.mark.aws
-def test_a_merged_1_3_send_is_counted_once_on_every_later_check(
-    dynamo_store: DynamoDbStore,
-) -> None:
-    # Cap of four: 1.4, 1.3, 1.4 (merges the 1.3 send into the quota item),
-    # 1.4, then the fifth is refused. Counting the merged send twice would
-    # refuse the fourth.
-    assert dynamo_store.issue_otp(challenge(), 60, 4, NOW) is None
-    send_as_1_3(dynamo_store, challenge(NOW + 61, otp_hash="h13"))
-    for step, stamp in enumerate((NOW + 122, NOW + 183)):
-        assert dynamo_store.issue_otp(challenge(stamp, otp_hash=f"s{step}"), 60, 4, stamp) is None
+    assert dynamo_store.issue_otp(challenge(later, otp_hash="h2"), 60, 5, later) is None
+    assert legacy_send_rows(dynamo_store) == []
     quota = dynamo_store._get_consistent({"pk": f"OTPQUOTA#{TEST_MSISDN}", "sk": "SENDS"})
     assert quota is not None
-    assert sorted(int(t) for t in quota["sends"]) == [NOW, NOW + 61, NOW + 122, NOW + 183]
-    last = NOW + 244
-    assert dynamo_store.issue_otp(challenge(last, otp_hash="h5"), 60, 4, last) == (
-        OtpIssueRefused("daily_quota", 3600)
-    )
+    assert [int(t) for t in quota["sends"]] == [NOW, later]
+    assert int(quota["expires_at"]) == later + 86400
 
 
 @pytest.mark.aws
-def test_legacy_rows_older_than_a_day_do_not_count_once_the_quota_exists(
+def test_issue_neither_queries_nor_writes_legacy_send_rows(
+    dynamo_store: DynamoDbStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dynamo_store._table.put_item(Item=legacy_send_row(NOW - 60))
+    queries: list[dict[str, Any]] = []
+    written: list[str] = []
+    original_query = dynamo_store._table.query
+    original_transact = dynamo_store._table.meta.client.transact_write_items
+
+    def spy_query(**kwargs: Any) -> Any:
+        queries.append(kwargs)
+        return original_query(**kwargs)
+
+    def spy_transact(**kwargs: Any) -> Any:
+        written.extend(str(item["Put"]["Item"]["pk"]) for item in kwargs["TransactItems"])
+        return original_transact(**kwargs)
+
+    monkeypatch.setattr(dynamo_store._table, "query", spy_query)
+    monkeypatch.setattr(dynamo_store._table.meta.client, "transact_write_items", spy_transact)
+    assert dynamo_store.issue_otp(challenge(), 60, 5, NOW) is None
+    assert queries == []
+    assert sorted(written) == [f"OTP#{TEST_MSISDN}", f"OTPQUOTA#{TEST_MSISDN}"]
+
+
+@pytest.mark.aws
+def test_legacy_send_rows_do_not_count_towards_the_daily_cap(
     dynamo_store: DynamoDbStore,
 ) -> None:
+    # Rows from the last day, as a 1.3 or 1.4 task left them. The quota item is
+    # the only source, so a cap of two allows exactly two sends from here.
+    for stamp in (NOW - 3600, NOW - 60):
+        dynamo_store._table.put_item(Item=legacy_send_row(stamp))
     assert dynamo_store.issue_otp(challenge(), 60, 2, NOW) is None
-    stale = NOW - 86401
-    dynamo_store._table.put_item(
-        Item={
-            "pk": f"OTPSEND#{TEST_MSISDN}",
-            "sk": str(stale).zfill(12),
-            "entity": "otp_send",
-            "expires_at": NOW + 3600,
-        }
-    )
     later = NOW + 61
     assert dynamo_store.issue_otp(challenge(later, otp_hash="h2"), 60, 2, later) is None
+    last = later + 61
+    assert dynamo_store.issue_otp(challenge(last, otp_hash="h3"), 60, 2, last) == (
+        OtpIssueRefused("daily_quota", 3600)
+    )
 
 
 def test_distinct_sends_in_the_same_second_each_spend_the_daily_quota(otp_store: Store) -> None:
@@ -583,30 +535,6 @@ def test_contention_answers_503_without_a_pending_signal(
     assert outcome.headers["Retry-After"] == "5"
     assert (outcome.metric, outcome.detail) == ("OtpStoreContention", "otp_store_contention")
     assert store.list_sms(TEST_MSISDN) == []
-
-
-@pytest.mark.aws
-def test_a_send_by_this_version_is_counted_by_the_legacy_query(
-    dynamo_store: DynamoDbStore,
-) -> None:
-    """During a rolling deployment 1.3 tasks count the cap from OTPSEND# rows."""
-    from boto3.dynamodb.conditions import Key
-
-    now = int(time.time())
-    assert dynamo_store.issue_otp(challenge(now), 0, 5, now) is None
-    # 1.3's count_otp_sends_today, verbatim in effect.
-    cutoff = int(time.time()) - 86400
-    response = dynamo_store._table.query(
-        KeyConditionExpression=Key("pk").eq(f"OTPSEND#{TEST_MSISDN}")
-        & Key("sk").gte(str(cutoff).zfill(12)),
-        Select="COUNT",
-    )
-    assert response["Count"] == 1
-    row = dynamo_store._table.get_item(
-        Key={"pk": f"OTPSEND#{TEST_MSISDN}", "sk": str(now).zfill(12)}
-    )["Item"]
-    assert row["entity"] == "otp_send"
-    assert int(row["expires_at"]) == now + 86400
 
 
 # ----------------------------------------------- challenge identity and 1.3

@@ -4,7 +4,7 @@ Decoding cost is bounded by its growth, not by a stopwatch. The size limits cap
 how much one request can make the codec do only while the work stays linear in
 input and output, so :func:`test_decoding_cost_grows_linearly_at_every_limit`
 compares this process's CPU time at one eighth of each limit with the time at
-the limit. Host load barely moves that ratio. The absolute two-second deadline
+the limit, with coverage paused. Host load barely moves that ratio. The absolute two-second deadline
 it replaces flaked on a busy host, and because it raised from a ``SIGALRM``
 handler it could unwind past a held lock and hang the suite (#45). A decoder
 that never returns is caught by pytest's ``faulthandler_timeout`` instead, set
@@ -24,10 +24,11 @@ from tests.test_dm_wbxml import HEADER, SMALL_WBXML
 from acs.protocol.omadm import wbxml
 
 # Growing the input eightfold multiplies linear cost by about 8 and quadratic
-# cost by about 64. The limit sits just above their geometric mean (22.6): a
-# linear decoder measured at most 12.6 on a host at load 126, and a superlinear
-# term is flagged once it costs more than about sqrt(8), 2.8 times the linear
-# work at the limit.
+# cost by about 64. The limit sits just above their geometric mean (22.6), and a
+# superlinear term is flagged once it costs more than about sqrt(8), 2.8 times
+# the linear work at the limit. Measured with coverage paused, as the test runs:
+# the current decoder reached at most 13.1 at host load averages up to 342, and
+# _take copying the rest of the input on every call (quadratic) 37-48.
 SCALE = 8
 GROWTH_LIMIT = 24
 ROUNDS = 3
@@ -342,6 +343,10 @@ def _decode_cpu_seconds(payload: bytes) -> float:
     return time.process_time() - started
 
 
+# The coverage tracer adds a cost to every Python line but none to a C-level
+# copy, so under --cov, which CI and make check use, a quadratic copy is diluted
+# below the limit. Every line measured here is covered by the other tests.
+@pytest.mark.no_cover
 @pytest.mark.parametrize(
     ("build", "limit"),
     [

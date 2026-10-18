@@ -37,11 +37,12 @@ testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q --strict-markers"
 # A safety net for a test that never returns, not a performance bound: the
-# slowest test takes about 4 s under coverage on a loaded host. The faulthandler
-# watchdog dumps every thread's stack and exits the run, so a hang fails CI
-# instead of stalling it; it raises nothing into the test, so it cannot unwind
-# past a held lock the way an exception from a signal handler can (#45).
-# faulthandler_exit_on_timeout needs pytest 9.0.
+# slowest test takes about 4 s of wall-clock time with --cov at host load
+# averages up to about 180. The faulthandler watchdog dumps every thread's stack
+# and exits the run, so a hang fails CI instead of stalling it; it raises
+# nothing into the test, so it cannot unwind past a held lock the way an
+# exception from a signal handler can (#45). faulthandler_exit_on_timeout needs
+# pytest 9.0.
 faulthandler_timeout = 300
 faulthandler_exit_on_timeout = true
 markers = [

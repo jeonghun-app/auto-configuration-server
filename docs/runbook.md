@@ -63,8 +63,8 @@ Common outcomes and their meaning:
 | `OtpSent` | Challenge issued | The client should repeat the request with `OTP=` |
 | `OtpRateLimited` | Cooldown or daily cap | Wait, or raise the cap |
 | `OtpDeliveryUnsupported` | Client asked for port-addressed SMS and the provider is `eum` or `sns` | Expected on AWS; needs `smpp`, see limitations |
-| `OtpDeliveryFailed` | The SMS provider or SMSC refused or failed the send; `503`, `Retry-After: 60`, challenge deleted | See [OTP delivery failing](#otp-delivery-failing) |
-| `OtpStoreContention` | OTP issue lost five conditional-write rounds; `503`, `Retry-After: 5` | Occasional: concurrent requests for one MSISDN. Sustained: see [OTP delivery failing](#otp-delivery-failing) |
+| `OtpDeliveryFailed` | The SMS provider or SMSC refused or failed the send; `503`, `Retry-After: 60`, challenge deleted | See [OTP delivery failed alarm fired](#otp-delivery-failed-alarm-fired) |
+| `OtpStoreContention` | OTP issue lost five conditional-write rounds; `503`, `Retry-After: 5` | Not expected with the resend cooldown on; see [OTP store contention alarm fired](#otp-store-contention-alarm-fired) |
 | `ConfigUnchanged` | Client already current | Not a fault |
 | `ConfigDisabled` | A forced negative `VERS` was served | Deliberate; check `forced_vers` |
 
@@ -127,11 +127,17 @@ watch the `OtpSent` metric.
    `ACS_OTP_RESEND_COOLDOWN_SECONDS`.
 5. Confirm the account SMS spending limit is set.
 
-## OTP delivery failing
+Severity: page (SEV2).
 
-`OtpDeliveryFailed` rising means OTPs are not leaving. Clients are told to retry
-after 60 seconds, and each failure deletes its challenge, so nothing is left
-waiting for a code that was never sent.
+## OTP delivery failed alarm fired
+
+Severity: page (SEV2), downgraded to no action at step 1 when only one number is
+affected.
+
+`<stack>-otp-delivery-failed` fires on any `OtpDeliveryFailed` in a minute from
+the configuration flow, and clears after five quiet minutes. Clients are told to
+retry after 60 seconds, and each failure deletes its challenge, so nothing is
+left waiting for a code that was never sent.
 
 ```bash
 aws logs filter-log-events --region $REGION \
@@ -139,8 +145,17 @@ aws logs filter-log-events --region $REGION \
   --filter-pattern '"otp delivery failed"' --max-items 20
 ```
 
-The `error` field names the cause without the password, the message or the
-number. With `smpp`, in order:
+1. **One number, or all of them?** Compare `OtpDeliveryFailed` with `OtpSent`
+   over the same window, and group the log entries above by their `msisdn`
+   field. If `OtpSent` keeps rising and the failures share one `msisdn` value,
+   the destination was refused — opted out, barred or invalid — or throttled.
+   Note it and stop. In the default `mask` mode the field keeps only the last
+   four digits, so a shared value is a strong hint rather than proof; `hash`
+   mode is unambiguous.
+2. **All numbers** — the provider path is failing. The `error` field names the
+   cause without the password, the message or the number. Continue below.
+
+With `smpp`, in order:
 
 1. **Every send fails right after a deploy** — the password secret still holds the
    stack's random placeholder. Set it as under
@@ -165,11 +180,41 @@ number. With `smpp`, in order:
 With `eum` or `sns`, check the origination identity, the sandbox and the account
 spending limit.
 
-`OtpStoreContention` is a store problem, not an SMS one: concurrent issue requests
-for one MSISDN kept invalidating each other's conditional writes. A burst for one
-number is expected and self-limiting. Sustained across many numbers, check
-DynamoDB throttling and the `5xx` alarm; throttling and capacity errors are raised
-as faults, not counted as contention.
+## OTP store contention alarm fired
+
+Severity: page (SEV2).
+
+`<stack>-otp-store-contention` fires when `OtpStoreContention` from the
+configuration flow stays above 5 per 5 minutes for three consecutive periods. It
+is a store problem, not an SMS one: OTP issue for one MSISDN lost its conditional
+write five rounds in a row, and the client was answered `503` with
+`Retry-After: 5`. While the resend cooldown is on, a burst of concurrent requests
+for one number does not cause this: the first wins and the rest are refused for
+the cooldown. Each occurrence is therefore abnormal, but it is one `503`, so only
+a sustained rate pages.
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"otp issue contention"' --max-items 50
+```
+
+1. **Is the resend cooldown off?** Check the task definition's
+   `ACS_OTP_RESEND_COOLDOWN_SECONDS`. At `0`, concurrent requests for one number
+   all race to write, and that is the most likely cause that is not an attack.
+   Restore it (default 60).
+2. **Is a rolling deployment from 1.3 in progress?** 1.3 and 1.4 tasks writing
+   the same MSISDN can collide; it ends when the deployment does.
+3. **The same `msisdn` value throughout** — one number is being hammered, by a
+   misbehaving client or by someone guessing its code. The value is masked or
+   pseudonymised, never the raw number; in `mask` mode a shared last four digits
+   is a strong hint rather than proof. Handle it as an abuse source, as under
+   [OTP volume alarm fired](#otp-volume-alarm-fired).
+4. **Many different numbers** — check the table's `ThrottledRequests` and
+   `SystemErrors` in `AWS/DynamoDB`, and the `5xx` alarm. Throttling and capacity
+   errors are raised as faults, not counted as contention, so they show up as
+   `5xx` rather than here; contention across many numbers with neither is worth
+   an issue.
 
 ## Setting or rotating the SMPP password
 
@@ -208,16 +253,30 @@ rollout completes.
 `scripts/deploy.sh` passes every `Smpp*` parameter on every run, so repeat the
 `--smpp-*` flags on every later deploy, or they reset to their defaults.
 
-## DM response encoding failed
+## DM encoding error alarm fired
 
-`DmEncodingError` is the server failing to encode its own WBXML response, answered
-with `500`. Session and device state are saved only after encoding succeeds, so
-nothing was stored and the client can retry. It is a server fault, not a device
-one: read the `dm response encoding failure` log entry and open an issue.
+Severity: ticket (SEV3).
+
+`<stack>-dm-encoding-error` fires on any `DmEncodingError` in a minute, and
+clears after five quiet minutes: the server failed to encode its own WBXML
+response and answered `500`. Session and device state are saved only after
+encoding succeeds, so nothing was stored and the client can retry. It is a
+server fault, not a device one: read the `dm response encoding failure` log
+entry and open an issue.
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"dm response encoding failure"' --max-items 20
+```
+
 `DmProtocolError` is the device-side counterpart — a request that could not be
 parsed or decoded, answered with `400`.
 
 ## 5xx alarm fired
+
+Severity: page (SEV2). If an `RcsAcs` alarm fired at the same time, start with its
+section: it names the cause.
 
 ```bash
 aws logs filter-log-events --region $REGION \
@@ -230,6 +289,8 @@ If the catalogue failed to load, the container will not have started at all — 
 the ECS service events and `stoppedReason`.
 
 ## Unhealthy targets
+
+Severity: page (SEV2).
 
 1. ECS service events: `aws ecs describe-services --cluster rcs-acs-app-cluster
    --services rcs-acs-app-service`.

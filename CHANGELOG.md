@@ -5,6 +5,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Alarms on `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`.**
+  Until now only the 5xx-rate alarm saw these. With `SmsProvider=smpp`, a wrong
+  SMSC password or an allow-list rejection on the configuration flow (`/config`)
+  showed up nowhere else; the `/msisdn` web flow still reports neither its sends
+  nor its failures (#47, #51). `<stack>-otp-delivery-failed` and
+  `<stack>-dm-encoding-error` fire on a single occurrence and clear only after
+  five quiet minutes, so a persistent fault at low traffic does not flap. A
+  `DmEncodingError` is always a server fault; an `OtpDeliveryFailed` can also be
+  one destination refused or throttled, which the runbook's first step tells
+  apart. `<stack>-otp-store-contention` fires above 5 per 5 minutes for three
+  consecutive periods: with the resend cooldown on, an ordinary burst for one
+  number never reaches contention, so its likely causes are the cooldown set to
+  0, code guessing or a mixed-version rollout. The alarms name both dimensions
+  the service publishes under, `Environment` and `Outcome`, and a test checks
+  them against the EMF the service emits. Like the existing three, they have no
+  alarm action. Set each one's action to the SNS topic the others use, and check
+  again after any deploy that changes an alarm: CloudFormation resets actions
+  added outside the template until the stack wires them itself (#48).
+  Thresholds and intended severity (page or ticket) are listed in
+  [docs/aws-deployment.md](docs/aws-deployment.md#alarms), and each alarm has a
+  section in [docs/runbook.md](docs/runbook.md) (#41).
+
 ### Removed
 
 - **The legacy `OTPSEND#<msisdn>` send rows.** OTP issue no longer writes a row

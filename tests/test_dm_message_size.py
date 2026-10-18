@@ -453,6 +453,133 @@ def test_an_abandoned_remainder_expires_with_its_session(
     assert dm_store.get_dm_pending(SESSION_KEY) is None
 
 
+# ------------------------------------------------------ partial store writes
+class FailingStore(MemoryStore):
+    """Fails the next save of one kind of record, once, after nothing else."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail: str | None = None
+
+    def _maybe_fail(self, record: str) -> None:
+        if self.fail == record:
+            self.fail = None
+            raise RuntimeError(f"simulated store failure saving the {record}")
+
+    def put_dm_pending(self, pending: DmPendingPackage) -> None:
+        self._maybe_fail("remainder")
+        super().put_dm_pending(pending)
+
+    def put_dm_session(self, session: DmSession) -> None:
+        self._maybe_fail("session")
+        super().put_dm_session(session)
+
+
+class RetryingClient(Client):
+    """Makes one request hit a store failure, then resends it as a device would."""
+
+    def __init__(
+        self, dm: DmService, store: FailingStore, limit: int, binary: bool, fail_on: int
+    ) -> None:
+        super().__init__(dm, limit, binary)
+        self.store = store
+        self.fail_on = fail_on
+        self.record = ""
+        self.requests = 0
+
+    def send(self, body: str, authenticated: bool = True) -> DmResponse:
+        self.requests += 1
+        if self.requests == self.fail_on:
+            self.store.fail = self.record
+            with pytest.raises(RuntimeError, match="simulated store failure"):
+                super().send(body, authenticated)
+            assert self.store.fail is None, "the failure must have been reached"
+            self.msg_id -= 1
+        return super().send(body, authenticated)
+
+
+@pytest.mark.spec
+@ENCODINGS
+@pytest.mark.parametrize("record", ["remainder", "session"])
+@pytest.mark.parametrize("stage", ["inventory", "configuration", "continuation"])
+def test_a_store_write_that_fails_once_loses_nothing_when_the_device_retries(
+    settings: Settings, dm_store: MemoryStore, binary: bool, record: str, stage: str
+) -> None:
+    reference = Client(fresh_service(settings, dm_store), SMALL[binary], binary)
+    expected, _ = run_session(reference)
+    assert len(expected[0]) > 1 and len(expected[1]) > 1, "both packages must split"
+    fail_on = {"inventory": 1, "continuation": 2, "configuration": len(expected[0]) + 1}[stage]
+
+    store = FailingStore()
+    subscriber = dm_store.get_subscriber(TEST_IMSI)
+    assert subscriber is not None
+    store.put_subscriber(deepcopy(subscriber))
+    client = RetryingClient(DmService(settings, store), store, SMALL[binary], binary, fail_on)
+    client.record = record
+    packages, closing = run_session(client)
+
+    # Every item arrives exactly once: nothing skipped, nothing repeated.
+    for name in ("Get", "Add", "Replace"):
+        assert items_of(packages[0] + packages[1], name) == items_of(
+            expected[0] + expected[1], name
+        )
+    assert closing.metric == "DmSessionComplete"
+    assert store.get_dm_session(SESSION_KEY) is None
+    assert store.get_dm_pending(SESSION_KEY) is None
+
+
+# ------------------------------------------------------ catalogue headroom
+@pytest.mark.spec
+def test_the_shipped_catalogue_leaves_headroom_under_every_package_limit(
+    settings: Settings, dm_store: MemoryStore
+) -> None:
+    """A catalogue grows by YAML alone. This fails in CI before growth can push a
+    real session into a 413 halfway through its configuration."""
+    assert len(fresh_service(settings, dm_store).tree.device_query_uris()) + 16 <= (
+        omadm_package.MAX_ACKNOWLEDGED_COMMANDS
+    )
+
+    def session_at(limit: int) -> tuple[list[list[syncml.SyncMlMessage]], int] | None:
+        store = MemoryStore()
+        subscriber = dm_store.get_subscriber(TEST_IMSI)
+        assert subscriber is not None
+        store.put_subscriber(deepcopy(subscriber))
+        client = Client(DmService(settings, store), limit, False)
+        largest = 0
+        original = client.send
+
+        def send(body: str, authenticated: bool = True) -> DmResponse:
+            nonlocal largest
+            outcome = original(body, authenticated)
+            pending = store.get_dm_pending(SESSION_KEY)
+            if pending is not None:
+                largest = max(largest, len(json.dumps(pending.entries, separators=(",", ":"))))
+            return outcome
+
+        client.send = send  # type: ignore[method-assign]
+        try:
+            packages, closing = run_session(client)
+        except AssertionError:
+            return None
+        return (packages, largest) if closing.metric == "DmSessionComplete" else None
+
+    # The smallest MaxMsgSize a whole XML session completes with is the worst case
+    # for the number of messages per package.
+    low, high = TOO_SMALL[False], 16384
+    assert session_at(low) is None and session_at(high) is not None
+    while high - low > 1:
+        middle = (low + high) // 2
+        if session_at(middle) is None:
+            low = middle
+        else:
+            high = middle
+    worst = session_at(high)
+    assert worst is not None
+    packages, largest = worst
+    assert max(len(p) for p in packages) <= omadm_package.MAX_MESSAGES_PER_PACKAGE // 2
+    assert largest <= omadm_package.MAX_STORED_BYTES // 2
+
+
 # ---------------------------------------------------- mixed-release deploys
 @pytest.mark.spec
 def test_a_remainder_left_behind_by_an_older_release_is_discarded(

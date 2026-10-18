@@ -842,6 +842,7 @@ requirements:
       - tests/test_dm_message_size.py::test_a_remainder_too_large_to_store_is_refused_and_changes_nothing
       - tests/test_dm_message_size.py::test_more_commands_than_one_message_may_acknowledge_are_refused_and_change_nothing
       - tests/test_dm_message_size.py::test_a_package_that_needs_too_many_messages_is_abandoned_with_its_session
+      - tests/test_dm_message_size.py::test_the_shipped_catalogue_leaves_headroom_under_every_package_limit
       - tests/test_dm_message_size.py::test_a_message_that_fails_authentication_never_reads_or_rewrites_the_remainder
       - tests/test_dm_session.py::test_dm_endpoint_refuses_a_huge_body
       - tests/test_dm_wbxml.py::test_repeated_string_table_references_cannot_exhaust_memory
@@ -861,6 +862,8 @@ requirements:
       - tests/test_store_dynamodb.py::test_expired_dm_session_is_treated_as_absent
       - tests/test_store_dynamodb.py::test_the_unsent_part_of_a_package_is_kept_beside_its_session
       - tests/test_store_dynamodb.py::test_an_expired_unsent_package_is_treated_as_absent
+      - tests/test_dm_message_size.py::test_an_abandoned_remainder_expires_with_its_session
+      - tests/test_dm_message_size.py::test_a_store_write_that_fails_once_loses_nothing_when_the_device_retries
     note: >
       A DM session spans several HTTP requests, so in-process state would break
       the moment the service runs more than one task.

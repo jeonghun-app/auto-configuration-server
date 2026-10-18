@@ -165,10 +165,14 @@ Each of those requests rewrites the stored remainder. Mitigations:
 - The remainder expires with its session (`ACS_DM_SESSION_TTL_SECONDS`, 600 s).
   Continuations do not extend it.
 
-Residual: one valid DM credential can make each request rewrite up to 32 KiB,
-for at most 128 requests per package, about 4 MiB of writes. Opening a new
-session with another `SessionID` starts again, so the total is bounded only by
-the request rate, and the default stack has no WAF (residual risk 4).
+Residual: one valid DM credential can make each request rewrite up to 32 KiB.
+That per-request bound holds. The 128-message cap is not a firm per-package
+bound: the counter is read, incremented and written back without a conditional
+write, so concurrent continuations of one session can lose increments and run
+past it. Opening a new session with another `SessionID` starts again anyway. The
+total is therefore bounded by 32 KiB per request times the request rate, and the
+default stack has no WAF (residual risk 4). A per-device DM rate limit and an
+alarm on `DmPackageContinued` are tracked in #65.
 
 `ACS_DM_AUTH_SCHEME=none` turns DM authentication off and makes all of this
 anonymous. The template does not set it, so the default `basic` applies, but

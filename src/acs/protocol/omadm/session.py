@@ -93,19 +93,44 @@ class _DmChanges:
     pending: DmPendingPackage | None = None
     delete_pending_id: str = ""
     delete_session_id: str = ""
+    progress_in_remainder: bool = False
+    """True while a package continues: the session's phase stays put and the
+    remainder alone records how far the package has got."""
 
     def commit(self, store: Store) -> None:
+        """Save the changes, writing last the record that holds the progress.
+
+        The two records are separate writes, so either can fail after the other
+        succeeded. Whatever records progress goes last, so a failure leaves it
+        where it was and the client's retry gets the same answer again. When a
+        package starts, the session's phase is the progress: if only the
+        remainder was saved, its phase does not match the session's and the
+        retry discards it. While a package continues, the remainder is the
+        progress: if only the session was saved, the retry is sent the same
+        message again.
+        """
         if self.device is not None:
             store.put_device(self.device)
-        if self.session is not None:
-            store.put_dm_session(self.session)
+        if self.progress_in_remainder:
+            self._save_session(store)
+            self._save_remainder(store)
+        else:
+            self._save_remainder(store)
+            self._save_session(store)
+
+    def _save_remainder(self, store: Store) -> None:
         if self.delete_pending_id:
             store.delete_dm_pending(self.delete_pending_id)
         if self.pending is not None:
             store.put_dm_pending(self.pending)
         if self.delete_session_id:
-            store.delete_dm_session(self.delete_session_id)
             store.delete_dm_pending(self.delete_session_id)
+
+    def _save_session(self, store: Store) -> None:
+        if self.session is not None:
+            store.put_dm_session(self.session)
+        if self.delete_session_id:
+            store.delete_dm_session(self.delete_session_id)
 
 
 class _ChallengeTooLarge(package.MessageTooLarge):
@@ -425,6 +450,7 @@ class DmService:
                 session_finished=True,
             )
         changes.device = self._absorb_device_values(message, session)
+        changes.progress_in_remainder = True
         if session.phase in _CONFIGURATION_PHASES:
             self._record_failures(message, session)
         acks = self._acks(message)

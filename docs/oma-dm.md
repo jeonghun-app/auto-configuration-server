@@ -99,6 +99,15 @@ device                                            ACS
   before splitting existed: one `Add` and one `Replace` carrying every item.
 - `CmdID` restarts at 1 in every message. A `Status` keeps the `MsgRef` of the
   message that carried the command it answers, which may be an earlier one.
+- The session's lifetime, `ACS_DM_SESSION_TTL_SECONDS` (600 s by default), is
+  set when the session starts and is not extended by continuations. A session
+  whose split packages take longer than that expires mid-package, with its
+  remainder. The device's next `Alert` 1222 then finds no session and is
+  answered `400` (`DmProtocolError`, no `Alert` 1200 or 1201), so the device has
+  to open a new session. The longest legitimate package measured, 55
+  messages, would need round trips slower than about 11 s each to run out of
+  time. A device that stalls, or a slow link with a very small `MaxMsgSize`,
+  can still hit it.
 - The session stays in its phase until the package is complete. The unsent part
   is stored in the session store as a record of its own beside the session
   (`DmPendingPackage`), so the next message can be served by any task. It is
@@ -150,7 +159,7 @@ the server store and rewrite is bounded. Each limit is a named constant in
 | Limit | Value | Detail | What happens |
 | --- | --- | --- | --- |
 | Commands one message may ask to be acknowledged (`MAX_ACKNOWLEDGED_COMMANDS`) | 100 | `too_many_commands` | Nothing is stored; the session is unchanged |
-| Messages in one package (`MAX_MESSAGES_PER_PACKAGE`) | 128 | `too_many_messages` | The session and its remainder are deleted |
+| Messages in one package (`MAX_MESSAGES_PER_PACKAGE`) | 128 | `too_many_messages` | The session and its remainder are deleted. Concurrent continuations of one session can run past it (see T14) |
 | Stored remainder, as compact JSON (`MAX_STORED_BYTES`) | 32 KiB | `package_too_large` | Nothing is stored; the session is unchanged |
 
 A device sends a handful of commands per message (`Status` is not

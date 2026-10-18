@@ -27,6 +27,24 @@ and to a JSON body sent to the admin API without a JSON `Content-Type` (now
 not narrow that row: refusing input the documentation allowed, or that a deployed
 handset sends, is still MAJOR.
 
+A second rule, added for 1.5.0: no longer reading stored data that only an older
+minor line needs is MINOR, with an upgrade note in the CHANGELOG naming the
+supported upgrade path, when all three of these hold:
+
+- the previous minor release announced the removal in its CHANGELOG;
+- the previous minor line reads and writes everything the new release relies on,
+  so upgrading through it and rolling back to it both keep working;
+- the data stops having any effect within a fixed period.
+
+1.5.0 applied it to the `OTPSEND#` send rows (#28, see the
+[decision](https://github.com/jeonghun-app/auto-configuration-server/issues/28#issuecomment-6251191228)).
+1.4.0 announced their removal, 1.4.x reads and updates the `OTPQUOTA#` item that
+1.5 writes, and a send row stops counting towards the daily OTP cap 24 hours
+after it was written. The supported path is therefore 1.3.x → 1.4.x →
+1.5.x. This rule does not narrow the MAJOR row either: dropping data that a
+supported upgrade path still depends on, or data that never expires, is still
+MAJOR.
+
 Only plain `X.Y.Z` is released. Pre-release tags (`v1.4.0-rc.1`) are refused by
 the workflow, so that a candidate can never move the `X.Y` or `latest` image tags.
 
@@ -183,6 +201,11 @@ Once an image has been published from a tag, do not move the tag. Publish
 
 ## Rollback
 
+From a release later than 1.4.x, roll back no further than 1.4.x, by any of the
+methods below. 1.3 counts the daily OTP cap from `OTPSEND#` rows, which later
+releases no longer write, so it would not count their sends (see
+[ADR 0002](adr/0002-datastore.md#amendment-legacy-send-rows-retired)).
+
 Prefer rolling forward with a patch release. When that is not fast enough:
 
 ### The image tags
@@ -192,7 +215,7 @@ can be moved back to the previous good release without rebuilding, after
 `docker login ghcr.io` with a token that has `write:packages`:
 
 ```bash
-GOOD=1.3.0      # the previous good release
+GOOD=1.4.0      # the previous good release
 docker buildx imagetools create \
   --tag ghcr.io/jeonghun-app/auto-configuration-server:latest \
   ghcr.io/jeonghun-app/auto-configuration-server:$GOOD

@@ -117,7 +117,9 @@ watch the `OtpSent` metric.
 
 ## OTP volume alarm fired
 
-1. Look at the rate: metric `OtpSent`, namespace `RcsAcs`.
+1. Look at the rate: metric `OtpSent`, namespace `RcsAcs`, dimensions
+   `Environment` (the stack's `Environment` parameter) and `Outcome=OtpSent`.
+   A query that omits either dimension finds no data.
 2. Check the source distribution in the ALB metrics or access logs (if enabled).
 3. Contain: narrow `AllowedCidr` on the stack, or attach a WAF rate-based rule.
 4. Reduce the limits without a deployment by updating the task definition
@@ -311,6 +313,11 @@ and the `--smpp-*` flags; anything left out reverts to the script's default (see
 previous image is still in ECR. The service deploys with
 `MinimumHealthyPercent: 100` and the circuit breaker enabled, so a bad rollout
 rolls itself back.
+
+From a release later than 1.4.x, roll back no further than 1.4.x. 1.3 counts the
+daily OTP cap from `OTPSEND#` rows, which later releases no longer write, so it
+would not count their sends (see
+[ADR 0002](adr/0002-datastore.md#amendment-legacy-send-rows-retired)).
 
 ## Adding a provisioning parameter
 

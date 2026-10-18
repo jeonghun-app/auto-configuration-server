@@ -233,9 +233,8 @@ as for the original three alarms: change them there and redeploy. Every alarm
 treats missing data as not breaching, because the `RcsAcs` outcome metrics have
 no data points until something happens. `tests/test_infra_alarms.py` checks that
 the alarms on `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`
-name the namespace and dimensions the service actually emits.
-`<stack>-otp-volume` does not name the dimensions yet, so it never sees data
-(#42).
+name the namespace and dimensions the service actually emits, and
+`tests/test_infra_otp_volume_alarm.py` does the same for `<stack>-otp-volume`.
 
 The stack sets no alarm action on any of the six. Set each alarm's action to an
 SNS topic that someone reads; see the

@@ -131,8 +131,8 @@ def emitted(
     store: MemoryStore,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-) -> tuple[str, dict[str, str]]:
-    """Return the namespace and dimensions *metric* is published under."""
+) -> tuple[str, dict[str, str], str]:
+    """Return the namespace, dimensions and unit *metric* is published under."""
     trigger, status = TRIGGERS[metric]
     capsys.readouterr()
     assert trigger(client, settings, store, monkeypatch) == status
@@ -141,9 +141,12 @@ def emitted(
             continue
         document = json.loads(line)
         for directive in document.get("_aws", {}).get("CloudWatchMetrics", []):
-            if any(entry["Name"] == metric for entry in directive["Metrics"]):
+            for entry in directive["Metrics"]:
+                if entry["Name"] != metric:
+                    continue
                 (dimension_set,) = directive["Dimensions"]
-                return directive["Namespace"], {key: document[key] for key in dimension_set}
+                dimensions = {key: document[key] for key in dimension_set}
+                return directive["Namespace"], dimensions, entry.get("Unit", "None")
     raise AssertionError(f"no EMF document published {metric}")
 
 
@@ -157,7 +160,9 @@ def test_the_alarm_matches_the_namespace_and_dimensions_the_metric_is_published_
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    namespace, dimensions = emitted(metric, client, settings, seeded_store, monkeypatch, capsys)
+    namespace, dimensions, _unit = emitted(
+        metric, client, settings, seeded_store, monkeypatch, capsys
+    )
     alarm = alarm_on(resources, metric)
     environment = container_environment(resources)
 
@@ -177,6 +182,24 @@ def test_the_alarm_matches_the_namespace_and_dimensions_the_metric_is_published_
         for dimension in alarm.get("Dimensions", [])
     }
     assert declared == dimensions
+
+
+@pytest.mark.parametrize("metric", sorted(TRIGGERS))
+def test_the_alarm_does_not_filter_on_a_unit_the_metric_is_not_published_in(
+    metric: str,
+    resources: dict[str, Any],
+    client: TestClient,
+    settings: Settings,
+    seeded_store: MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # An alarm that names a Unit sees only data points published in that unit,
+    # so a mismatch leaves it silent exactly like a missing dimension.
+    _namespace, _dimensions, unit = emitted(
+        metric, client, settings, seeded_store, monkeypatch, capsys
+    )
+    assert alarm_on(resources, metric).get("Unit", unit) == unit
 
 
 @pytest.mark.parametrize("metric", sorted(TRIGGERS))

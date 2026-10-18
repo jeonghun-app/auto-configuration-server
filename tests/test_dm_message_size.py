@@ -340,6 +340,58 @@ def test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing(
     assert client.send(body, authenticated=stage != "challenge").status_code == 200
 
 
+@pytest.mark.spec
+@ENCODINGS
+@pytest.mark.parametrize("stage", ["init", "continuation"])
+def test_at_the_smallest_workable_max_msg_size_the_message_fits_and_moves_the_package_on(
+    settings: Settings, dm_store: MemoryStore, binary: bool, stage: str
+) -> None:
+    def answer(limit: int) -> DmResponse:
+        """The server's answer to *stage* when the client advertises *limit*."""
+        store = MemoryStore()
+        subscriber = dm_store.get_subscriber(TEST_IMSI)
+        assert subscriber is not None
+        store.put_subscriber(deepcopy(subscriber))
+        client = Client(DmService(settings, store), SMALL[binary], binary)
+        body = INIT_BODY
+        if stage == "continuation":
+            assert not client.parse(client.send(INIT_BODY)).final
+            body = next_message_body(client.msg_id)
+        before = store.get_dm_session(SESSION_KEY)
+        client.limit = limit
+        outcome = client.send(body)
+        after = store.get_dm_session(SESSION_KEY)
+        if stage == "continuation" and outcome.status_code == 200:
+            assert before is not None and after is not None
+            # A continuation that only acknowledged the request would leave the
+            # remainder as it was, and client and server would loop forever.
+            assert len(after.pending) < len(before.pending)
+        return outcome
+
+    # Search for the threshold rather than hard-code it, so the test survives
+    # catalogue changes.
+    low, high = TOO_SMALL[binary], SMALL[binary]
+    assert answer(low).status_code == 400
+    assert answer(high).status_code == 200
+    while high - low > 1:
+        middle = (low + high) // 2
+        if answer(middle).status_code == 200:
+            high = middle
+        else:
+            low = middle
+
+    refused = answer(high - 1)
+    assert refused.status_code == 400 and refused.metric == "DmMessageTooLarge"
+    fitted = answer(high)
+    message = read(fitted, binary, high)
+    assert not message.final
+    if stage == "init":
+        # One entry of the package: the acknowledgement of the client's Alert.
+        assert [s.cmd for s in message.of("Status")] == ["SyncHdr", "Alert"]
+    else:
+        assert message.of("Get"), "a continuation must carry part of the remainder"
+
+
 # ------------------------------------------------------ OMADM-SEC-BODY-LIMIT
 def test_a_remainder_too_large_to_store_is_refused_and_changes_nothing(
     dm: DmService, dm_store: MemoryStore, caplog: pytest.LogCaptureFixture

@@ -734,6 +734,11 @@ Resources:
         attack: the attacker triggers SMS that the operator pays for.
       Namespace: RcsAcs
       MetricName: OtpSent
+      # The service publishes OtpSent only under Environment plus Outcome, and
+      # an alarm sees a metric only when it names the full dimension set.
+      Dimensions:
+        - { Name: Environment, Value: !Ref Environment }
+        - { Name: Outcome, Value: OtpSent }
       Statistic: Sum
       Period: 300
       EvaluationPeriods: 1

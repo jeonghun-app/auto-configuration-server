@@ -5,6 +5,19 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The OTP volume alarm could never fire.** `<stack>-otp-volume` named no
+  dimensions, but the service publishes `OtpSent` only under `Environment` and
+  `Outcome`, and a CloudWatch alarm matches a metric only on its full dimension
+  set. The alarm therefore watched a metric with no data points and, treating
+  missing data as not breaching, stayed `OK` whatever the send volume — leaving
+  SMS pumping (threat T5) to the rate limits and the account spending limit
+  alone. It now names both dimensions, and a test compares it with the EMF the
+  OTP path actually emits. After deploying, expect it to fire above 500 OTPs in
+  5 minutes as documented; review that threshold against your real volume
+  (#42).
+
 ## [1.4.0] — 2026-10-04
 
 Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM

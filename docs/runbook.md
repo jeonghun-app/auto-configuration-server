@@ -117,7 +117,9 @@ watch the `OtpSent` metric.
 
 ## OTP volume alarm fired
 
-1. Look at the rate: metric `OtpSent`, namespace `RcsAcs`.
+1. Look at the rate: metric `OtpSent`, namespace `RcsAcs`, dimensions
+   `Environment` (the stack's `Environment` parameter) and `Outcome=OtpSent`.
+   A query that omits either dimension finds no data.
 2. Check the source distribution in the ALB metrics or access logs (if enabled).
 3. Contain: narrow `AllowedCidr` on the stack, or attach a WAF rate-based rule.
 4. Reduce the limits without a deployment by updating the task definition

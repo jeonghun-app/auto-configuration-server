@@ -149,6 +149,22 @@ Catalogue values are a few hundred bytes at most. With the shipped catalogue, a
 whole session completes with a `MaxMsgSize` of about 1.3 KB in XML and about
 370 bytes in WBXML.
 
+### When a store write fails
+
+The session and the unsent part of a package are separate writes, and the one
+that records progress is written last: the remainder when a package starts, the
+session while a package continues. A device that retries after either write
+failed gets the same answer again, with nothing skipped or repeated
+(`test_a_store_write_that_fails_once_loses_nothing_when_the_device_retries`).
+One case is left open on purpose. At the close step of a split final package,
+where the session is deleted together with its remainder, a failed remainder
+delete makes the device's retry get `400 DmProtocolError`, because the session
+is already gone. All configuration has been delivered by then; what is lost is
+the last acknowledgements and the completion metric (`DmSessionComplete`), and
+the leftover remainder expires with the session's TTL. No write order closes
+this fully: deleting the remainder first instead means a failed session delete
+makes the retry close the session without sending those last acknowledgements.
+
 ### Resource limits
 
 Every continuation rewrites the stored remainder, so what one client can make

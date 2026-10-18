@@ -21,6 +21,20 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   1.0.0, so DynamoDB deletes them itself, usually within a few days of expiry.
   No release after 1.4.x reads them.
 
+### Fixed
+
+- **The OTP volume alarm could never fire.** `<stack>-otp-volume` named no
+  dimensions, but the service publishes `OtpSent` only under `Environment` and
+  `Outcome`, and a CloudWatch alarm matches a metric only on its full dimension
+  set. The alarm therefore watched a metric with no data points and, treating
+  missing data as not breaching, stayed `OK` whatever the send volume — leaving
+  SMS pumping (threat T5) to the rate limits and the account spending limit
+  alone. It now names both dimensions, and a test compares it with the EMF the
+  OTP path actually emits. After deploying, expect it to fire above 500 OTPs
+  sent through the configuration flow (`/config`) in 5 minutes, and review
+  that threshold against your real volume. OTPs sent through the `/msisdn` web
+  flow still emit no `OtpSent` and are not counted yet; see #51 (#42).
+
 ### Upgrade notes
 
 This is a minor release although 1.3.x can no longer be upgraded from directly
@@ -42,6 +56,11 @@ effect ends 24 hours after the last 1.3 send; see
   in the same versioned, conditional transaction, so the cap holds across a
   mixed deployment and daily counts survive a rollback to 1.4.x. Do not roll
   back to 1.3.x: it would not count any send made since the upgrade.
+- **Re-attach any SNS action to `<stack>-otp-volume` after deploying.** The
+  template sets no alarm actions, and the stack update that fixes the alarm
+  rewrites its whole definition, dropping an action attached by hand. Repeat
+  this after every deploy that changes an alarm until the stack wires the
+  actions itself (#48).
 
 ## [1.4.0] — 2026-10-04
 

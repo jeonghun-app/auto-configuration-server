@@ -184,23 +184,49 @@ Each outcome metric is published under exactly one dimension set: `Environment`
 (the stack's `Environment` parameter) and `Outcome` (the metric's own name). A
 CloudWatch alarm or graph sees a metric only when it names the full dimension
 set, so a query on `RcsAcs/OtpDeliveryFailed` without `Outcome` finds nothing.
+`MalformedRequest` and `ConfigBytes` are the exceptions: they carry `Environment`
+only, so a query on them that adds `Outcome` finds nothing either.
 
 ### Alarms
 
-| Alarm | Metric | Fires when |
-| --- | --- | --- |
-| `<stack>-unhealthy-targets` | `AWS/ApplicationELB` `UnHealthyHostCount` | At least one unhealthy target in each of 3 consecutive minutes |
-| `<stack>-5xx` | `AWS/ApplicationELB` `HTTPCode_Target_5XX_Count` | More than 10 in 5 minutes |
-| `<stack>-otp-volume` | `RcsAcs` `OtpSent` | More than 500 in 5 minutes |
-| `<stack>-otp-delivery-failed` | `RcsAcs` `OtpDeliveryFailed` | Any, in a 1-minute period |
-| `<stack>-otp-store-contention` | `RcsAcs` `OtpStoreContention` | More than 5 in each of 3 consecutive 5-minute periods |
-| `<stack>-dm-encoding-error` | `RcsAcs` `DmEncodingError` | Any, in a 1-minute period |
+| Alarm | Metric | Fires when | Severity |
+| --- | --- | --- | --- |
+| `<stack>-unhealthy-targets` | `AWS/ApplicationELB` `UnHealthyHostCount` | At least one unhealthy target in each of 3 consecutive minutes | Page (SEV2) |
+| `<stack>-5xx` | `AWS/ApplicationELB` `HTTPCode_Target_5XX_Count` | More than 10 in 5 minutes | Page (SEV2) |
+| `<stack>-otp-volume` | `RcsAcs` `OtpSent` | More than 500 in 5 minutes | Page (SEV2) |
+| `<stack>-otp-delivery-failed` | `RcsAcs` `OtpDeliveryFailed` | Any in a minute; clears after 5 quiet minutes | Page (SEV2) |
+| `<stack>-otp-store-contention` | `RcsAcs` `OtpStoreContention` | More than 5 in each of 3 consecutive 5-minute periods | Page (SEV2) |
+| `<stack>-dm-encoding-error` | `RcsAcs` `DmEncodingError` | Any in a minute; clears after 5 quiet minutes | Ticket (SEV3) |
 
-`OtpDeliveryFailed` and `DmEncodingError` are server faults, so one is enough.
-`OtpStoreContention` is OTP issue losing five conditional-write rounds to
-concurrent requests for the same MSISDN; a burst on one number is expected and
-stops by itself, so only a rate held for 15 minutes alarms. Each of the three is
-also answered with a `5xx`, so a large burst trips the `5xx` alarm as well.
+Severity is what the alarm is meant to be routed to once actions are wired. SEV2
+is a partial outage of a core journey, answered within 30 minutes, day or night;
+SEV3 has a workaround and waits for the next business day. When `<stack>-5xx`
+fires together with one of the `RcsAcs` alarms, the `RcsAcs` one names the cause.
+
+`<stack>-otp-delivery-failed` and `<stack>-dm-encoding-error` fire on a single
+occurrence. `DmEncodingError` is always a server fault. `OtpDeliveryFailed` is
+not: the AWS senders turn every provider error into a delivery failure and the
+SMPP sender every refused `submit_sm`, so one destination that is opted out,
+barred, invalid or throttled also counts. The alarm still pages on one, because
+the provider path failing for everyone looks the same for its first minute; the
+runbook's first step separates the two. Both alarms evaluate 1 of 5 one-minute
+datapoints, so a persistent fault at low traffic holds `ALARM` instead of
+flapping back to `OK` between requests.
+
+`OtpStoreContention` is OTP issue losing five conditional-write rounds for one
+MSISDN. A burst of concurrent requests for one number does not produce it while
+the resend cooldown (`ACS_OTP_RESEND_COOLDOWN_SECONDS`, default 60) is on: the
+first writer wins, and every other request re-reads, finds the fresh challenge
+and is refused for the cooldown instead. Contention therefore needs the cooldown
+set to `0`, verification writes racing on a challenge older than the cooldown
+(someone guessing), or 1.3 and 1.4 tasks overlapping in a rolling deployment.
+Each occurrence is a single `503` with `Retry-After: 5`, so only a rate held for
+15 minutes pages.
+
+The OTP alarms count only OTPs requested through the configuration flow
+(`/config`). The `/msisdn` web flow emits no metric for its OTP sends or failures
+yet (#47, #51). Every outcome the three new alarms count is also answered with a
+`5xx`, so a large burst trips `<stack>-5xx` as well.
 
 Thresholds and periods are constants in `infra/app.yaml`, not stack parameters,
 as for the original three alarms: change them there and redeploy. Every alarm
@@ -211,8 +237,12 @@ name the namespace and dimensions the service actually emits.
 `<stack>-otp-volume` does not name the dimensions yet, so it never sees data
 (#42).
 
-The stack sets no alarm action on any of the six. Subscribe an SNS topic that
-someone reads to all of them; see the [deployment checklist](#deployment-checklist).
+The stack sets no alarm action on any of the six. Set each alarm's action to an
+SNS topic that someone reads; see the
+[deployment checklist](#deployment-checklist). An action added outside the
+template, in the console or with the CLI, is reset whenever CloudFormation
+updates that alarm, for example after a threshold change here, so check the
+actions after every such deploy. The stack will wire them itself with #48.
 [runbook.md](runbook.md) has a section for each alarm.
 
 ## IAM

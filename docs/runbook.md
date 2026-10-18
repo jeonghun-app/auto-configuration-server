@@ -125,11 +125,11 @@ watch the `OtpSent` metric.
    `ACS_OTP_RESEND_COOLDOWN_SECONDS`.
 5. Confirm the account SMS spending limit is set.
 
-## OTP delivery failing
+## OTP delivery failed alarm fired
 
-`OtpDeliveryFailed` rising means OTPs are not leaving. Clients are told to retry
-after 60 seconds, and each failure deletes its challenge, so nothing is left
-waiting for a code that was never sent.
+`<stack>-otp-delivery-failed` fires on any `OtpDeliveryFailed` in a minute: OTPs
+are not leaving. Clients are told to retry after 60 seconds, and each failure
+deletes its challenge, so nothing is left waiting for a code that was never sent.
 
 ```bash
 aws logs filter-log-events --region $REGION \
@@ -163,11 +163,30 @@ number. With `smpp`, in order:
 With `eum` or `sns`, check the origination identity, the sandbox and the account
 spending limit.
 
-`OtpStoreContention` is a store problem, not an SMS one: concurrent issue requests
-for one MSISDN kept invalidating each other's conditional writes. A burst for one
-number is expected and self-limiting. Sustained across many numbers, check
-DynamoDB throttling and the `5xx` alarm; throttling and capacity errors are raised
-as faults, not counted as contention.
+## OTP store contention alarm fired
+
+`<stack>-otp-store-contention` fires when `OtpStoreContention` stays above 5 per
+5 minutes for three consecutive periods. It is a store problem, not an SMS one:
+concurrent issue requests for one MSISDN kept invalidating each other's
+conditional writes for five rounds, and the client was answered `503` with
+`Retry-After: 5`. A burst for one number is expected and self-limiting, which is
+why one period is not enough to alarm.
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"otp issue contention"' --max-items 50
+```
+
+1. **The same `msisdn` value throughout** — one number is being hammered, by a
+   misbehaving client or by someone targeting it. The value is masked or
+   pseudonymised, never the raw number. Handle it as an abuse source, as under
+   [OTP volume alarm fired](#otp-volume-alarm-fired).
+2. **Many different numbers** — suspect the table. Check its `ThrottledRequests`
+   and `SystemErrors` in `AWS/DynamoDB`, and the `5xx` alarm. Throttling and
+   capacity errors are raised as faults, not counted as contention, so they show
+   up as `5xx` rather than here; contention across many numbers with no
+   throttling means an unusual concurrent-request pattern worth an issue.
 
 ## Setting or rotating the SMPP password
 
@@ -206,12 +225,20 @@ rollout completes.
 `scripts/deploy.sh` passes every `Smpp*` parameter on every run, so repeat the
 `--smpp-*` flags on every later deploy, or they reset to their defaults.
 
-## DM response encoding failed
+## DM encoding error alarm fired
 
-`DmEncodingError` is the server failing to encode its own WBXML response, answered
-with `500`. Session and device state are saved only after encoding succeeds, so
-nothing was stored and the client can retry. It is a server fault, not a device
-one: read the `dm response encoding failure` log entry and open an issue.
+`<stack>-dm-encoding-error` fires on any `DmEncodingError` in a minute: the server
+failed to encode its own WBXML response and answered `500`. Session and device
+state are saved only after encoding succeeds, so nothing was stored and the
+client can retry. It is a server fault, not a device one: read the
+`dm response encoding failure` log entry and open an issue.
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"dm response encoding failure"' --max-items 20
+```
+
 `DmProtocolError` is the device-side counterpart — a request that could not be
 parsed or decoded, answered with `400`.
 

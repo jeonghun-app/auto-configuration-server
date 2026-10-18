@@ -21,7 +21,7 @@ destroys the images it was running. Immutable tags, scan on push, lifecycle poli
 | HTTPS listener (with a certificate) | `ELBSecurityPolicy-TLS13-1-2-2021-06`; HTTP redirects to HTTPS |
 | Application Auto Scaling | Target tracking on `ALBRequestCountPerTarget` |
 | CloudWatch log group | Retention configurable, default 30 days |
-| 3 CloudWatch alarms | Unhealthy targets, 5xx rate, OTP send volume |
+| 6 CloudWatch alarms | Unhealthy targets, 5xx rate, OTP send volume, OTP delivery failure, OTP store contention, DM response encoding — see [Alarms](#alarms) |
 
 ## Deploying
 
@@ -180,11 +180,40 @@ Metrics emitted: `ConfigServed`, `ConfigUnchanged`, `ConfigDisabled`, `OtpSent`,
 `MalformedRequest`, `ConfigBytes`, and the `Dm*` family, including
 `DmEncodingError`.
 
-The stack's three alarms do not cover `OtpDeliveryFailed`, `OtpStoreContention` or
-`DmEncodingError`. Each is answered with a `5xx`, so the 5xx-rate alarm sees a
-sustained burst; add a dedicated alarm if one of them should page on its own.
-Alarms for them in the stack are tracked in #31.
-[runbook.md](runbook.md#otp-delivery-failing) says what each means.
+Each outcome metric is published under exactly one dimension set: `Environment`
+(the stack's `Environment` parameter) and `Outcome` (the metric's own name). A
+CloudWatch alarm or graph sees a metric only when it names the full dimension
+set, so a query on `RcsAcs/OtpDeliveryFailed` without `Outcome` finds nothing.
+
+### Alarms
+
+| Alarm | Metric | Fires when |
+| --- | --- | --- |
+| `<stack>-unhealthy-targets` | `AWS/ApplicationELB` `UnHealthyHostCount` | At least one unhealthy target in each of 3 consecutive minutes |
+| `<stack>-5xx` | `AWS/ApplicationELB` `HTTPCode_Target_5XX_Count` | More than 10 in 5 minutes |
+| `<stack>-otp-volume` | `RcsAcs` `OtpSent` | More than 500 in 5 minutes |
+| `<stack>-otp-delivery-failed` | `RcsAcs` `OtpDeliveryFailed` | Any, in a 1-minute period |
+| `<stack>-otp-store-contention` | `RcsAcs` `OtpStoreContention` | More than 5 in each of 3 consecutive 5-minute periods |
+| `<stack>-dm-encoding-error` | `RcsAcs` `DmEncodingError` | Any, in a 1-minute period |
+
+`OtpDeliveryFailed` and `DmEncodingError` are server faults, so one is enough.
+`OtpStoreContention` is OTP issue losing five conditional-write rounds to
+concurrent requests for the same MSISDN; a burst on one number is expected and
+stops by itself, so only a rate held for 15 minutes alarms. Each of the three is
+also answered with a `5xx`, so a large burst trips the `5xx` alarm as well.
+
+Thresholds and periods are constants in `infra/app.yaml`, not stack parameters,
+as for the original three alarms: change them there and redeploy. Every alarm
+treats missing data as not breaching, because the `RcsAcs` outcome metrics have
+no data points until something happens. `tests/test_infra_alarms.py` checks that
+the alarms on `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`
+name the namespace and dimensions the service actually emits.
+`<stack>-otp-volume` does not name the dimensions yet, so it never sees data
+(#42).
+
+The stack sets no alarm action on any of the six. Subscribe an SNS topic that
+someone reads to all of them; see the [deployment checklist](#deployment-checklist).
+[runbook.md](runbook.md) has a section for each alarm.
 
 ## IAM
 

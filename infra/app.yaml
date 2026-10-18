@@ -741,6 +741,72 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # The service publishes each outcome metric under exactly one dimension set,
+  # Environment plus Outcome (equal to the metric name), and an alarm only sees a
+  # metric whose dimensions match in full. The thresholds and periods below are
+  # fixed on purpose and documented in docs/aws-deployment.md#alarms.
+  OtpDeliveryFailedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-otp-delivery-failed'
+      AlarmDescription: >
+        An OTP could not be handed to the SMS provider or SMSC, so a subscriber
+        was refused a code they asked for. With SmsProvider=smpp a wrong password
+        or an allow-list rejection shows up only here.
+      Namespace: RcsAcs
+      MetricName: OtpDeliveryFailed
+      Dimensions:
+        - { Name: Environment, Value: !Ref Environment }
+        - { Name: Outcome, Value: OtpDeliveryFailed }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # Contention is OTP issue losing five conditional-write rounds to concurrent
+  # requests for the same MSISDN. A burst for one number is expected and stops
+  # by itself, so only a rate held for three consecutive periods alarms.
+  OtpStoreContentionAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-otp-store-contention'
+      AlarmDescription: >
+        OTP issue has kept losing conditional writes for 15 minutes. One MSISDN
+        is being hammered, or the table is unhealthy.
+      Namespace: RcsAcs
+      MetricName: OtpStoreContention
+      Dimensions:
+        - { Name: Environment, Value: !Ref Environment }
+        - { Name: Outcome, Value: OtpStoreContention }
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 3
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  DmEncodingErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub '${AWS::StackName}-dm-encoding-error'
+      AlarmDescription: >
+        The ACS failed to encode its own WBXML DM response. A server fault, not
+        a device one; the session and device state were left unchanged.
+      Namespace: RcsAcs
+      MetricName: DmEncodingError
+      Dimensions:
+        - { Name: Environment, Value: !Ref Environment }
+        - { Name: Outcome, Value: DmEncodingError }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
 Outputs:
   LoadBalancerDns:
     Description: Public DNS name of the ACS load balancer.

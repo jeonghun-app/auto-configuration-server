@@ -5,6 +5,21 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Alarms on `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`.**
+  Until now only the 5xx-rate alarm saw these, and with `SmsProvider=smpp` a wrong
+  SMSC password or an allow-list rejection showed up nowhere else.
+  `<stack>-otp-delivery-failed` and `<stack>-dm-encoding-error` fire on any
+  occurrence in a minute, since each is a server fault.
+  `<stack>-otp-store-contention` fires only above 5 per 5 minutes for three
+  consecutive periods, since a burst on one MSISDN is expected. The alarms name
+  both dimensions the service publishes under, `Environment` and `Outcome`, and
+  a test checks them against the EMF the service emits. Like the existing three,
+  they have no alarm action: subscribe the same SNS topic to them. Thresholds are
+  listed in [docs/aws-deployment.md](docs/aws-deployment.md#alarms), and each
+  alarm has a section in [docs/runbook.md](docs/runbook.md) (#41).
+
 ## [1.4.0] — 2026-10-04
 
 Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM

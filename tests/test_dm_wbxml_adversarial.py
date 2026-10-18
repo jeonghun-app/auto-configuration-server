@@ -1,12 +1,21 @@
-"""Seeded adversarial inputs and exact resource boundaries for the DM codec."""
+"""Seeded adversarial inputs and exact resource boundaries for the DM codec.
+
+Decoding cost is bounded by its growth, not by a stopwatch. The size limits cap
+how much one request can make the codec do only while the work stays linear in
+input and output, so :func:`test_decoding_cost_grows_linearly_at_every_limit`
+compares this process's CPU time at one eighth of each limit with the time at
+the limit, with coverage paused. Host load barely moves that ratio. The absolute two-second deadline
+it replaces flaked on a busy host, and because it raised from a ``SIGALRM``
+handler it could unwind past a held lock and hang the suite (#45). A decoder
+that never returns is caught by pytest's ``faulthandler_timeout`` instead, set
+in ``pyproject.toml``.
+"""
 
 from __future__ import annotations
 
 import random
-import signal
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -14,7 +23,15 @@ from tests.test_dm_wbxml import HEADER, SMALL_WBXML
 
 from acs.protocol.omadm import wbxml
 
-INPUT_SECONDS = 2.0
+# Growing the input eightfold multiplies linear cost by about 8 and quadratic
+# cost by about 64. The limit sits just above their geometric mean (22.6), and a
+# superlinear term is flagged once it costs more than about sqrt(8), 2.8 times
+# the linear work at the limit. Measured with coverage paused, as the test runs:
+# the current decoder reached at most 13.1 at host load averages up to 342, and
+# _take copying the rest of the input on every call (quadratic) 37-48.
+SCALE = 8
+GROWTH_LIMIT = 24
+ROUNDS = 3
 XML_OPEN = b'<SyncML xmlns="SYNCML:SYNCML1.2" xmlns:metinf="syncml:metinf"><Data>'
 XML_CLOSE = b"</Data></SyncML>"
 VALUES = (
@@ -30,33 +47,14 @@ VALUES = (
 )
 
 
-def _timeout(_signum: int, _frame: object) -> None:
-    raise AssertionError(f"a single codec input exceeded {INPUT_SECONDS}s")
-
-
-@contextmanager
-def _deadline() -> Iterator[None]:
-    # An elapsed-time assertion alone never returns if a mutated input hangs.
-    previous = signal.signal(signal.SIGALRM, _timeout)
-    started = time.perf_counter()
-    signal.setitimer(signal.ITIMER_REAL, INPUT_SECONDS)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
-    assert time.perf_counter() - started < INPUT_SECONDS
-
-
 def _decode_or_reject(payload: bytes) -> bool:
-    with _deadline():
-        try:
-            xml = wbxml.decode(payload)
-        except wbxml.WbxmlError:
-            return False
-        root = ET.fromstring(xml)
-        assert root.tag in ("{SYNCML:SYNCML1.1}SyncML", "{SYNCML:SYNCML1.2}SyncML")
-        assert len(xml) <= wbxml.MAX_XML_BYTES
+    try:
+        xml = wbxml.decode(payload)
+    except wbxml.WbxmlError:
+        return False
+    root = ET.fromstring(xml)
+    assert root.tag in ("{SYNCML:SYNCML1.1}SyncML", "{SYNCML:SYNCML1.2}SyncML")
+    assert len(xml) <= wbxml.MAX_XML_BYTES
     return True
 
 
@@ -132,15 +130,14 @@ def test_seeded_syncml_trees_preserve_values_and_structure(
         root = _random_document(rng, namespace)
         xml = ET.tostring(root, encoding="utf-8").replace(b"\r", b"&#13;")
         public_id = f"-//SYNCML//DTD SyncML {namespace[-3:]}//EN" if index % 2 else None
-        with _deadline():
-            wire = wbxml.encode(
-                xml,
-                version=version,
-                public_id=public_id,
-                use_string_table=use_string_table,
-                opaque=opaque,
-            )
-            decoded = ET.fromstring(wbxml.decode(wire))
+        wire = wbxml.encode(
+            xml,
+            version=version,
+            public_id=public_id,
+            use_string_table=use_string_table,
+            opaque=opaque,
+        )
+        decoded = ET.fromstring(wbxml.decode(wire))
         assert _tree_value(decoded) == _tree_value(root), (seed, index)
         assert all(element.text is None for element in decoded.iter() if len(element))
         assert all(element.tail is None for element in decoded.iter())
@@ -223,13 +220,12 @@ def test_the_input_byte_limit_accepts_exactly_the_boundary(excess: int) -> None:
     length = wbxml.MAX_INPUT_BYTES + excess
     wire = prefix + b"x" * (length - len(prefix) - len(suffix)) + suffix
     assert len(wire) == length
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="input exceeds size"):
-                wbxml.decode(wire)
-        else:
-            xml = wbxml.decode(wire)
-            assert ET.fromstring(xml)[0].text == "x" * (length - len(prefix) - len(suffix))
+    if excess:
+        with pytest.raises(wbxml.WbxmlError, match="input exceeds size"):
+            wbxml.decode(wire)
+    else:
+        xml = wbxml.decode(wire)
+        assert ET.fromstring(xml)[0].text == "x" * (length - len(prefix) - len(suffix))
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -253,15 +249,14 @@ def test_the_decoded_byte_limit_includes_escaped_text_and_closing_tags(
         + b"\x00\x01\x01"
     )
     assert len(wire) < wbxml.MAX_INPUT_BYTES
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="output exceeds size"):
-                wbxml.decode(wire)
-        else:
-            xml = wbxml.decode(wire)
-            assert xml == XML_OPEN + expanded * repeats + b"x" * remainder + XML_CLOSE
-            assert len(xml) == length
-            assert ET.fromstring(xml)[0].text == raw.decode() * repeats + "x" * remainder
+    if excess:
+        with pytest.raises(wbxml.WbxmlError, match="output exceeds size"):
+            wbxml.decode(wire)
+    else:
+        xml = wbxml.decode(wire)
+        assert xml == XML_OPEN + expanded * repeats + b"x" * remainder + XML_CLOSE
+        assert len(xml) == length
+        assert ET.fromstring(xml)[0].text == raw.decode() * repeats + "x" * remainder
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -272,14 +267,13 @@ def test_the_depth_limit_counts_both_empty_and_content_elements(
     depth = wbxml.MAX_DEPTH + excess
     leaf = b"\x54\x03value\x00\x01" if content_leaf else b"\x14"
     wire = HEADER + b"\x6d" + b"\x54" * (depth - 2) + leaf + b"\x01" * (depth - 1)
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="depth limit"):
-                wbxml.decode(wire)
-        else:
-            xml = wbxml.decode(wire)
-            assert sum(1 for _ in ET.fromstring(xml).iter()) == depth
-            assert wbxml.encode(xml) == wire
+    if excess:
+        with pytest.raises(wbxml.WbxmlError, match="depth limit"):
+            wbxml.decode(wire)
+    else:
+        xml = wbxml.decode(wire)
+        assert sum(1 for _ in ET.fromstring(xml).iter()) == depth
+        assert wbxml.encode(xml) == wire
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -290,13 +284,108 @@ def test_the_element_limit_counts_both_empty_and_content_elements(
     count = wbxml.MAX_ELEMENTS + excess
     leaf = b"\x4f\x03x\x00\x01" if content_leaf else b"\x0f"
     wire = HEADER + b"\x6d" + leaf * (count - 1) + b"\x01"
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="element count"):
-                wbxml.decode(wire)
-        else:
-            xml = wbxml.decode(wire)
-            assert sum(1 for _ in ET.fromstring(xml).iter()) == count
+    if excess:
+        with pytest.raises(wbxml.WbxmlError, match="element count"):
+            wbxml.decode(wire)
+    else:
+        xml = wbxml.decode(wire)
+        assert sum(1 for _ in ET.fromstring(xml).iter()) == count
+
+
+def _page_switches(size: int) -> bytes:
+    # One token per two input bytes: the most iterations of the token loop.
+    return HEADER + b"\x00\x00" * ((size - len(HEADER) - 1) // 2) + b"\x2d"
+
+
+def _inline_string(size: int) -> bytes:
+    prefix, suffix = HEADER + b"\x6d\x4f\x03", b"\x00\x01\x01"
+    return prefix + b"x" * (size - len(prefix) - len(suffix)) + suffix
+
+
+def _opaque_string(size: int) -> bytes:
+    length = size - len(HEADER) - 10
+    return HEADER + b"\x6d\x4f\xc3" + _uint(length) + b"x" * length + b"\x01\x01"
+
+
+def _table_references(raw: bytes, expanded: bytes) -> Callable[[int], bytes]:
+    # Two input bytes per reference, each writing a whole table entry: the
+    # largest output for the input.
+    def build(size: int) -> bytes:
+        repeats = (size - len(XML_OPEN) - len(XML_CLOSE)) // len(expanded)
+        table = raw + b"\x00"
+        return (
+            HEADER[:-1]
+            + _uint(len(table))
+            + table
+            + b"\x6d\x4f"
+            + b"\x83\x00" * repeats
+            + b"\x01\x01"
+        )
+
+    return build
+
+
+def _short_table_references(size: int) -> bytes:
+    # The most output tokens for the input: each two-byte reference writes one
+    # byte, so per-write costs are multiplied the most.
+    table = b"x\x00"
+    prefix = HEADER[:-1] + _uint(len(table)) + table + b"\x6d\x4f"
+    return prefix + b"\x83\x00" * ((size - len(prefix) - 2) // 2) + b"\x01\x01"
+
+
+def _content_elements(count: int) -> bytes:
+    return HEADER + b"\x6d" + b"\x4f\x03x\x00\x01" * (count - 1) + b"\x01"
+
+
+def _decode_cpu_seconds(payload: bytes) -> float:
+    started = time.process_time()
+    wbxml.decode(payload)
+    return time.process_time() - started
+
+
+# The coverage tracer adds a cost to every Python line but none to a C-level
+# copy, so under --cov, which CI and make check use, a quadratic copy is diluted
+# below the limit. Every line measured here is covered by the other tests.
+@pytest.mark.no_cover
+@pytest.mark.parametrize(
+    ("build", "limit"),
+    [
+        (_page_switches, wbxml.MAX_INPUT_BYTES),
+        (_inline_string, wbxml.MAX_INPUT_BYTES),
+        (_opaque_string, wbxml.MAX_INPUT_BYTES),
+        (_table_references(b"x" * 4096, b"x" * 4096), wbxml.MAX_XML_BYTES),
+        (_table_references(b"<&>\r" * 256, b"&lt;&amp;&gt;&#13;" * 256), wbxml.MAX_XML_BYTES),
+        (_short_table_references, wbxml.MAX_INPUT_BYTES),
+        (_content_elements, wbxml.MAX_ELEMENTS),
+    ],
+    ids=[
+        "page-switches",
+        "inline",
+        "opaque",
+        "table-refs",
+        "escaped-table-refs",
+        "short-table-refs",
+        "elements",
+    ],
+)
+def test_decoding_cost_grows_linearly_at_every_limit(
+    build: Callable[[int], bytes], limit: int
+) -> None:
+    small, large = build(limit // SCALE), build(limit)
+    assert len(large) <= wbxml.MAX_INPUT_BYTES
+    # Process CPU time excludes the time this process spends waiting for a busy
+    # host; interleaving the two sizes and keeping each one's fastest run evens
+    # out the slowdown that remains.
+    small_runs: list[float] = []
+    large_runs: list[float] = []
+    for _ in range(ROUNDS):
+        small_runs.append(_decode_cpu_seconds(small))
+        large_runs.append(_decode_cpu_seconds(large))
+    growth = min(large_runs) / min(small_runs)
+    assert growth < GROWTH_LIMIT, (
+        f"{SCALE}x the input cost {growth:.1f}x the CPU time "
+        f"({min(small_runs):.4f}s -> {min(large_runs):.4f}s); linear is about {SCALE}x"
+    )
 
 
 def _integer_document(field: str, integer: bytes) -> bytes:

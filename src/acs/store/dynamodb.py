@@ -6,7 +6,6 @@ Table design (partition key ``pk``, sort key ``sk``)::
     MSISDN#<msisdn>  SUB           reverse index -> imsi
     OTP#<msisdn>     CHAL          pending OTP challenge          (TTL)
     OTPQUOTA#<msisdn> SENDS        send times for the daily cap   (TTL)
-    OTPSEND#<msisdn> <epoch>       legacy send rows: merged with OTPQUOTA#, dual-written for 1.3
     TOKEN#<sha256>   META          provisioning token            (TTL)
     DEV#<device_id>  META          managed device
     DMSESS#<sid>     META          OMA-DM session state           (TTL)
@@ -236,10 +235,6 @@ class DynamoDbStore:
                     return OtpIssueRefused("cooldown", cooldown_seconds - age)
             history = quota["sends"] if quota else []
             sends = [int(t) for t in history if int(t) >= now - 86400]
-            # Until #28, 1.3 can write more legacy rows after the quota was seeded.
-            # Exclude dual-written seconds, but preserve distinct sends already
-            # counted in the quota within one second when cooldown is disabled.
-            sends.extend(sorted(set(self._legacy_sends(msisdn, now)) - set(sends)))
             if len(sends) >= max_sends_per_day:
                 return OtpIssueRefused("daily_quota", 3600)
 
@@ -267,23 +262,9 @@ class DynamoDbStore:
                 challenge_put["ConditionExpression"] = "attribute_not_exists(pk)"
             else:
                 challenge_put.update(_same_challenge(existing))
-            # Mixed-version compatibility, to be removed by #28 ("Stop dual-writing
-            # legacy OTPSEND rows") once no 1.3 task can be running: 1.3 counts
-            # the daily cap by querying these rows, so during a rolling deployment
-            # it must see the sends made here. Same key, attributes and TTL as
-            # 1.3's record_otp_send. Unconditional, as 1.3 wrote it.
-            legacy_put: dict[str, Any] = {
-                "TableName": self._table_name,
-                "Item": {
-                    "pk": f"OTPSEND#{msisdn}",
-                    "sk": str(now).zfill(12),
-                    "entity": "otp_send",
-                    "expires_at": now + 86400,
-                },
-            }
             try:
                 client.transact_write_items(
-                    TransactItems=[{"Put": quota_put}, {"Put": challenge_put}, {"Put": legacy_put}]
+                    TransactItems=[{"Put": quota_put}, {"Put": challenge_put}]
                 )
             except ClientError as exc:
                 if not _lost_a_condition(exc):
@@ -294,21 +275,6 @@ class DynamoDbStore:
             return None
         log.warning("otp issue lost every optimistic write round")
         raise OtpStoreContention("concurrent OTP issue for one MSISDN kept conflicting")
-
-    def _legacy_sends(self, msisdn: str, now: int) -> list[int]:
-        """Send times from the legacy OTPSEND# rows in the last 24 hours.
-
-        Read on every quota check until #28 removes mixed-version support: 1.3
-        tasks can still send after the quota item exists.
-        """
-        from boto3.dynamodb.conditions import Key
-
-        response = self._table.query(
-            KeyConditionExpression=Key("pk").eq(f"OTPSEND#{msisdn}")
-            & Key("sk").gte(str(now - 86400).zfill(12)),
-            ConsistentRead=True,
-        )
-        return [int(item["sk"]) for item in response.get("Items", [])]
 
     def replace_otp(self, expected: OtpChallenge, replacement: OtpChallenge | None) -> bool:
         key = {"pk": f"OTP#{expected.msisdn}", "sk": "CHAL"}

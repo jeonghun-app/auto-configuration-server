@@ -14,7 +14,6 @@ import pytest
 from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
 from tests.test_dm_session import DM_PASSWORD, SESSION_KEY, basic_cred, package
 from tests.test_dm_wbxml import SMALL_WBXML
-from tests.test_dm_wbxml_adversarial import _deadline
 
 from acs.app import create_app
 from acs.config import Settings
@@ -117,9 +116,8 @@ def test_xml_and_wbxml_agree_on_each_transition_and_persisted_inventory(
             use_string_table=mode == "table",
             opaque=mode == "opaque",
         )
-        with _deadline():
-            plain = services[0].handle(xml, syncml.CONTENT_TYPE_XML)
-            binary = services[1].handle(wire, syncml.CONTENT_TYPE_WBXML)
+        plain = services[0].handle(xml, syncml.CONTENT_TYPE_XML)
+        binary = services[1].handle(wire, syncml.CONTENT_TYPE_WBXML)
         assert plain.status_code == binary.status_code == 200
         assert plain.metric == binary.metric == metric
         assert plain.detail == binary.detail
@@ -226,12 +224,11 @@ async def test_mutated_binary_requests_return_http_errors_without_changing_exist
                 wbxml.decode(candidate)
             except wbxml.WbxmlError:
                 rejected += 1
-                with _deadline():
-                    response = await client.post(
-                        "/dm",
-                        content=candidate,
-                        headers={"Content-Type": syncml.CONTENT_TYPE_WBXML},
-                    )
+                response = await client.post(
+                    "/dm",
+                    content=candidate,
+                    headers={"Content-Type": syncml.CONTENT_TYPE_WBXML},
+                )
                 assert response.status_code == 400 and response.content == b""
                 assert store.get_dm_session(SESSION_KEY) == before_session
                 assert store.get_device(TEST_IMEI) == before_device

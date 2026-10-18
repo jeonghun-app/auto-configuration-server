@@ -5,7 +5,59 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Alarms on `OtpDeliveryFailed`, `OtpStoreContention` and `DmEncodingError`.**
+  Until now only the 5xx-rate alarm saw these. With `SmsProvider=smpp`, a wrong
+  SMSC password or an allow-list rejection on the configuration flow (`/config`)
+  showed up nowhere else; the `/msisdn` web flow still reports neither its sends
+  nor its failures (#47, #51). `<stack>-otp-delivery-failed` and
+  `<stack>-dm-encoding-error` fire on a single occurrence and clear only after
+  five quiet minutes, so a persistent fault at low traffic does not flap. A
+  `DmEncodingError` is always a server fault; an `OtpDeliveryFailed` can also be
+  one destination refused or throttled, which the runbook's first step tells
+  apart. `<stack>-otp-store-contention` fires above 5 per 5 minutes for three
+  consecutive periods: with the resend cooldown on, an ordinary burst for one
+  number never reaches contention, so its likely causes are the cooldown set to
+  0, code guessing or a mixed-version rollout. The alarms name both dimensions
+  the service publishes under, `Environment` and `Outcome`, and a test checks
+  them against the EMF the service emits. Like the existing three, they have no
+  alarm action. Set each one's action to the SNS topic the others use, and check
+  again after any deploy that changes an alarm: CloudFormation resets actions
+  added outside the template until the stack wires them itself (#48).
+  Thresholds and intended severity (page or ticket) are listed in
+  [docs/aws-deployment.md](docs/aws-deployment.md#alarms), and each alarm has a
+  section in [docs/runbook.md](docs/runbook.md) (#41).
+
+### Removed
+
+- **The legacy `OTPSEND#<msisdn>` send rows.** OTP issue no longer writes a row
+  per send next to the `OTPQUOTA#<msisdn>` item, and no longer queries those rows
+  on every quota check. The quota item is now the only source of the daily cap,
+  in the DynamoDB store as in the in-memory one. The extra row and query existed
+  only so that 1.3 and 1.4 tasks shared one count during a rolling deployment
+  (#28). An OTP issue that reaches the quota check makes one `Query` fewer, and
+  its transaction writes two items instead of three. No IAM action is added or
+  removed: `Query` is still used by the admin listings and the mock SMS outbox.
+- Rows already in a table are inert and need no cleanup. Every release that
+  wrote them (1.0.0 to 1.4.x) set `expires_at` to the send time plus 24 hours,
+  and the stack has declared `expires_at` as the table's TTL attribute since
+  1.0.0, so DynamoDB deletes them itself, usually within a few days of expiry.
+  No release after 1.4.x reads them.
+
 ### Fixed
+
+- **The OTP volume alarm could never fire.** `<stack>-otp-volume` named no
+  dimensions, but the service publishes `OtpSent` only under `Environment` and
+  `Outcome`, and a CloudWatch alarm matches a metric only on its full dimension
+  set. The alarm therefore watched a metric with no data points and, treating
+  missing data as not breaching, stayed `OK` whatever the send volume — leaving
+  SMS pumping (threat T5) to the rate limits and the account spending limit
+  alone. It now names both dimensions, and a test compares it with the EMF the
+  OTP path actually emits. After deploying, expect it to fire above 500 OTPs
+  sent through the configuration flow (`/config`) in 5 minutes, and review
+  that threshold against your real volume. OTPs sent through the `/msisdn` web
+  flow still emit no `OtpSent` and are not counted yet; see #51 (#42).
 
 - **OMA-DM responses respect the client's `MaxMsgSize`.** Until now a package was
   always sent as one message, so a device advertising 16384 bytes could receive
@@ -26,6 +78,33 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   exercises splitting, and `scripts/verify_stack.py` now runs a second DM
   session at 1500 bytes. See [docs/oma-dm.md](docs/oma-dm.md#message-size).
   (#20)
+
+### Upgrade notes
+
+This is a minor release although 1.3.x can no longer be upgraded from directly
+or rolled back to. Handsets, the admin API, the `ACS_*` settings and the data
+1.4.x reads are unchanged, the incompatibility is with 1.3.x alone, and its
+effect ends 24 hours after the last 1.3 send; see
+[docs/releasing.md](docs/releasing.md#versioning) and the
+[version decision on #28](https://github.com/jeonghun-app/auto-configuration-server/issues/28#issuecomment-6251191228).
+
+- **Upgrade from 1.4.x only.** Rolling from 1.3.x directly to this release is
+  unsupported. 1.3 tasks count the daily OTP cap from `OTPSEND#` rows, which the
+  new tasks neither write nor read, so during the rollout each version ignores
+  the other's sends and one MSISDN can receive up to twice the cap. Deploy 1.4.x
+  first, and keep it running for at least 24 hours after the last 1.3 task
+  stops: 1.4 carries a 1.3 send into the quota item only when it next checks
+  that MSISDN, and after 24 hours no 1.3 send is left to count.
+- **Rolling from 1.4.x, and back to it, keeps the cap.** 1.4 tasks still write
+  and read the legacy rows, but both versions count the quota item and update it
+  in the same versioned, conditional transaction, so the cap holds across a
+  mixed deployment and daily counts survive a rollback to 1.4.x. Do not roll
+  back to 1.3.x: it would not count any send made since the upgrade.
+- **Re-attach any SNS action to `<stack>-otp-volume` after deploying.** The
+  template sets no alarm actions, and the stack update that fixes the alarm
+  rewrites its whole definition, dropping an action attached by hand. Repeat
+  this after every deploy that changes an alarm until the stack wires the
+  actions itself (#48).
 
 ## [1.4.0] — 2026-10-04
 

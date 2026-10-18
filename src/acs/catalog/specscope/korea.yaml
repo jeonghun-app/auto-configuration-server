@@ -67,7 +67,7 @@ families:
     note: >
       The related_gaps list is where an assessment would most likely land, based
       on what national operator profiles usually require. That is expectation, not
-      knowledge, and none of those gaps is currently closed.
+      knowledge. Of those requirements, only OMADM-SIZE-SPLITTING is implemented.
 
   - id: kr-mno-interworking
     title: Korean three-operator RCS interworking specification

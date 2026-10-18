@@ -59,6 +59,26 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that threshold against your real volume. OTPs sent through the `/msisdn` web
   flow still emit no `OtpSent` and are not counted yet; see #51 (#42).
 
+- **OMA-DM responses respect the client's `MaxMsgSize`.** Until now a package was
+  always sent as one message, so a device advertising 16384 bytes could receive
+  231,588 bytes of XML and reject it. A package that does not fit is now sent as
+  several messages: all but the last omit `Final`, and the device asks for the
+  next with `Alert` 1222. Size is measured on the encoded bytes, in XML and in
+  WBXML. Statuses and individual `Get`, `Add` and `Replace` items are split, so a
+  long `Replace` continues in the next message; a package that fits is unchanged
+  on the wire. The session keeps its phase and the unsent part until the package
+  is complete, and `Results` or failure statuses sent with `Alert` 1222 are still
+  recorded. If even the smallest next message cannot fit, the answer is `400`
+  with `DmMessageTooLarge` (`DmChallengeTooLarge` for an authentication
+  challenge) and nothing is stored; items are not chunked as large objects. The
+  unsent part is stored beside the session, read only for authenticated
+  messages. A message may ask for at most 100 acknowledgements, a package may
+  take at most 128 messages, and the stored part is capped at 32 KiB; each limit
+  answers `413` with `DmTooLarge`. `tools/dm_client_sim.py --max-msg-size`
+  exercises splitting, and `scripts/verify_stack.py` now runs a second DM
+  session at 1500 bytes. See [docs/oma-dm.md](docs/oma-dm.md#message-size).
+  (#20)
+
 ### Upgrade notes
 
 This is a minor release although 1.3.x can no longer be upgraded from directly

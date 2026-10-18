@@ -97,7 +97,7 @@ requirements:
     status: partial
     verification: behaviour-tested
     implemented_by:
-      - src/acs/protocol/omadm/session.py::DmService._ack_only
+      - src/acs/protocol/omadm/session.py::DmService._acks
     tests:
       - tests/test_dm_syncml.py::test_status_carries_the_references
     gap: >
@@ -106,8 +106,10 @@ requirements:
       keeping its own outbound counter.
     impact: >
       A replayed or out-of-order client message is processed as if it were new.
-      Harmless in the strict request and response flow used today; it becomes
-      wrong as soon as the server sends two messages for one client message.
+      The server still sends one message per client message, so the mirrored
+      MsgID stays unique. A client that resends a message because the answer was
+      lost is answered with the next part of a split package or the next phase,
+      and the lost message is not repeated.
 
   - id: OMADM-HDR-ADDRESSING
     title: Set Target to the client source and Source to the DM server URI
@@ -135,25 +137,71 @@ requirements:
     title: Split a package that exceeds the negotiated MaxMsgSize
     spec: OMA-TS-DM_Protocol, large message handling
     level: mandatory
-    status: not-implemented
-    verification: code-review-only
-    gap: >
-      The negotiated size is advertised but the server always emits its commands
-      in a single package. DmSession.pending exists for this and is unused.
-    impact: >
-      A client advertising a small MaxMsgSize may reject or truncate the
-      configuration push. This is the most likely remaining real-device failure.
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/package.py::fill
+      - src/acs/protocol/omadm/package.py::apply
+      - src/acs/protocol/omadm/session.py::DmService._next_message
+      - src/acs/protocol/omadm/session.py::DmService._start_package
+    tests:
+      - tests/test_dm_message_size.py::test_no_message_of_a_whole_session_exceeds_the_client_max_msg_size
+      - tests/test_dm_message_size.py::test_a_message_exactly_at_max_msg_size_is_sent_whole_and_one_byte_less_is_split
+      - tests/test_dm_message_size.py::test_every_received_command_is_acknowledged_once_across_a_split_package
+      - tests/test_dm_message_size.py::test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing
+      - tests/test_dm_message_size.py::test_at_the_smallest_workable_max_msg_size_the_message_fits_and_moves_the_package_on
+      - tests/test_dm_wbxml_session.py::test_the_most_commands_a_message_may_carry_receive_the_same_package_in_xml_and_wbxml
+      - tests/test_dm_wbxml_simulator.py::test_the_cli_follows_a_split_package_within_its_max_msg_size
+    note: >
+      Every message is measured in the encoding it is sent in, XML or WBXML,
+      against the smaller of the client's MaxMsgSize and ACS_DM_MAX_MSG_SIZE.
+      Statuses and Get, Add and Replace items are split individually, so a long
+      Replace continues in the next message. If the smallest message the server
+      must send cannot fit, it answers HTTP 400 with DmMessageTooLarge
+      (DmChallengeTooLarge for an authentication challenge) and stores nothing;
+      see OMADM-SIZE-LARGE-OBJECT.
 
   - id: OMADM-ALERT-1222
     title: Continue a split package on Alert 1222
     spec: OMA-TS-DM_Protocol, Alert 1222 NEXT MESSAGE
     level: conditional
+    status: implemented
+    verification: behaviour-tested
+    implemented_by:
+      - src/acs/protocol/omadm/session.py::DmService._continue_package
+    tests:
+      - tests/test_dm_message_size.py::test_a_continuation_does_not_advance_the_session_phase
+      - tests/test_dm_message_size.py::test_statuses_and_results_sent_with_alert_1222_are_not_lost
+      - tests/test_dm_message_size.py::test_ending_a_session_mid_package_discards_the_remainder
+      - tests/test_dm_message_size.py::test_a_closing_package_that_does_not_fit_ends_the_session_with_its_last_message
+      - tests/test_dm_message_size.py::test_at_the_smallest_workable_max_msg_size_the_message_fits_and_moves_the_package_on
+      - tests/test_dm_message_size.py::test_a_challenge_mid_package_carries_final_and_the_package_resumes_after_it
+      - tests/test_dm_message_size.py::test_a_remainder_left_behind_by_an_older_release_is_discarded
+    note: >
+      Any client message that arrives while a package is incomplete is answered
+      with its next message, Alert 1222 or not, and its Results and Status are
+      recorded. Each such answer must also move the package on by at least one
+      entry, so a package cannot stall. An authentication challenge that arrives
+      mid-package is a complete package of its own and carries Final; the
+      remainder is kept and resumes once the client authenticates. A remainder
+      whose phase no longer matches the session's is discarded.
+
+  - id: OMADM-SIZE-LARGE-OBJECT
+    title: Send an item larger than one message as a large object
+    spec: OMA-TS-DM_Protocol, large object handling
+    level: conditional
     status: not-implemented
-    verification: code-review-only
-    gap: The constant is defined; no handler exists.
+    verification: behaviour-tested
+    tests:
+      - tests/test_dm_message_size.py::test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing
+    gap: >
+      An item is never chunked with MoreData. When one item, with the header and
+      the acknowledgements it must travel with, does not fit the negotiated
+      MaxMsgSize, the request is refused with HTTP 400 and DmMessageTooLarge.
     impact: >
-      Conditional on OMADM-SIZE-SPLITTING: with no splitting there is never a
-      further package for the client to ask for.
+      Catalogue values are a few hundred bytes at most, so no current node needs
+      it. A client advertising a MaxMsgSize too small for one item, or an
+      override value larger than one message, cannot be configured.
 
   - id: OMADM-FINAL
     title: Mark the last message of a package with Final
@@ -166,6 +214,7 @@ requirements:
     tests:
       - tests/test_dm_syncml.py::test_non_final_package_omits_final
       - tests/test_dm_session.py::test_full_session_pushes_ims_and_volte_configuration
+      - tests/test_dm_message_size.py::test_no_message_of_a_whole_session_exceeds_the_client_max_msg_size
 
   # ------------------------------------------------------------------- flow
   - id: OMADM-FLOW-CLIENT-INIT
@@ -304,9 +353,11 @@ requirements:
     status: implemented
     verification: behaviour-tested
     implemented_by:
-      - src/acs/protocol/omadm/session.py::DmService._ack_only
+      - src/acs/protocol/omadm/session.py::DmService._acks
+      - src/acs/protocol/omadm/session.py::DmService._next_message
     tests:
       - tests/test_conformance_protocol.py::test_every_received_command_gets_a_status
+      - tests/test_dm_message_size.py::test_every_received_command_is_acknowledged_once_across_a_split_package
 
   - id: OMADM-CMD-RESULTS
     title: Parse Results and record the values reported by the device
@@ -411,7 +462,7 @@ requirements:
     status: implemented
     verification: behaviour-tested
     implemented_by:
-      - src/acs/protocol/omadm/session.py::DmService._ack_only
+      - src/acs/protocol/omadm/session.py::DmService._header_status
     tests:
       - tests/test_dm_session.py::test_valid_basic_credentials_are_accepted
 
@@ -547,7 +598,7 @@ requirements:
     status: partial
     verification: behaviour-tested
     implemented_by:
-      - src/acs/protocol/omadm/session.py::DmService._ack_only
+      - src/acs/protocol/omadm/session.py::DmService._header_status
     tests:
       - tests/test_conformance_protocol.py::test_md5_sessions_carry_a_chal_on_success
     gap: >
@@ -740,7 +791,7 @@ requirements:
       - tests/test_dm_wbxml.py::test_removing_indentation_preserves_whitespace_in_leaf_values
       - tests/test_dm_wbxml_session.py::test_wbxml_requests_preserve_state_through_a_complete_dm_session
       - tests/test_dm_wbxml_session.py::test_wbxml_md5_credentials_are_checked_against_the_stored_nonce
-      - tests/test_dm_wbxml_session.py::test_six_thousand_replace_commands_receive_the_same_response_in_xml_and_wbxml
+      - tests/test_dm_wbxml_session.py::test_the_most_commands_a_message_may_carry_receive_the_same_package_in_xml_and_wbxml
       - tests/test_dm_wbxml_session.py::test_wbxml_encoding_failure_preserves_session_and_device_state
       - tests/test_dm_wbxml_session.py::test_server_wbxml_response_matches_independent_header_status_and_metinf_bytes
       - tests/test_dm_wbxml_session.py::test_server_commands_match_independent_compact_wbxml_tokens
@@ -753,7 +804,8 @@ requirements:
       Separate encoder limits accommodate response expansion. Encoding failures
       return HTTP 500 with DmEncodingError before session or device writes.
       Encoding omits indentation between elements and preserves leaf text,
-      including whitespace-only values.
+      including whitespace-only values. Responses are split to the client's
+      MaxMsgSize measured in WBXML bytes.
     gap: >
       This is the text-valued SyncML / MetInf subset, not general WBXML.
       Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY,
@@ -784,8 +836,14 @@ requirements:
       - src/acs/protocol/omadm/session.py::DmService.handle
       - src/acs/api/dm.py::dm_session
       - src/acs/protocol/omadm/wbxml.py::decode
+      - src/acs/protocol/omadm/package.py::to_stored
     tests:
       - tests/test_dm_session.py::test_oversized_payload_is_refused
+      - tests/test_dm_message_size.py::test_a_remainder_too_large_to_store_is_refused_and_changes_nothing
+      - tests/test_dm_message_size.py::test_more_commands_than_one_message_may_acknowledge_are_refused_and_change_nothing
+      - tests/test_dm_message_size.py::test_a_package_that_needs_too_many_messages_is_abandoned_with_its_session
+      - tests/test_dm_message_size.py::test_the_shipped_catalogue_leaves_headroom_under_every_package_limit
+      - tests/test_dm_message_size.py::test_a_message_that_fails_authentication_never_reads_or_rewrites_the_remainder
       - tests/test_dm_session.py::test_dm_endpoint_refuses_a_huge_body
       - tests/test_dm_wbxml.py::test_repeated_string_table_references_cannot_exhaust_memory
       - tests/test_dm_wbxml.py::test_wbxml_nesting_is_bounded_in_both_directions
@@ -802,6 +860,10 @@ requirements:
     tests:
       - tests/test_store_dynamodb.py::test_dm_session_round_trip
       - tests/test_store_dynamodb.py::test_expired_dm_session_is_treated_as_absent
+      - tests/test_store_dynamodb.py::test_the_unsent_part_of_a_package_is_kept_beside_its_session
+      - tests/test_store_dynamodb.py::test_an_expired_unsent_package_is_treated_as_absent
+      - tests/test_dm_message_size.py::test_an_abandoned_remainder_expires_with_its_session
+      - tests/test_dm_message_size.py::test_a_store_write_that_fails_once_loses_nothing_when_the_device_retries
     note: >
       A DM session spans several HTTP requests, so in-process state would break
       the moment the service runs more than one task.

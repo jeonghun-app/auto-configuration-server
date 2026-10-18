@@ -73,6 +73,45 @@ def test_the_wbxml_cli_drives_an_authenticated_session(
     assert device is not None and device.sw_version == "SIM-1.0"
 
 
+@pytest.mark.spec
+@pytest.mark.parametrize(("binary", "limit"), [(False, 1500), (True, 400)], ids=["xml", "wbxml"])
+def test_the_cli_follows_a_split_package_within_its_max_msg_size(
+    settings: Settings,
+    store: MemoryStore,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    binary: bool,
+    limit: int,
+) -> None:
+    store.put_subscriber(Subscriber(imsi=TEST_IMSI, msisdn=TEST_MSISDN, dm_password=DM_PASSWORD))
+    service = DmService(settings, store)
+    sizes: list[int] = []
+    client_class = httpx.Client
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        outcome = service.handle(request.content, request.headers["content-type"])
+        assert outcome.status_code == 200, outcome.detail
+        sizes.append(len(outcome.body))
+        return httpx.Response(
+            outcome.status_code,
+            content=outcome.body,
+            headers={"Content-Type": outcome.content_type},
+        )
+
+    def make_client(*, timeout: float, verify: bool) -> httpx.Client:
+        return client_class(transport=httpx.MockTransport(handle), timeout=timeout, verify=verify)
+
+    monkeypatch.setattr(dm_client_sim.httpx, "Client", make_client)
+    arguments = ["--imsi", TEST_IMSI, "--imei", TEST_IMEI, "--password", DM_PASSWORD]
+    arguments += ["--max-msg-size", str(limit)] + (["--wbxml"] if binary else [])
+    assert dm_client_sim.main(arguments) == 0
+
+    assert len(sizes) > 3, "the server must have split at least one package"
+    assert max(sizes) <= limit
+    assert f"no server message exceeded MaxMsgSize {limit}" in capsys.readouterr().out
+    assert store.get_dm_session(SESSION_KEY) is None
+
+
 def test_the_wbxml_cli_fails_if_the_server_replies_with_xml(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

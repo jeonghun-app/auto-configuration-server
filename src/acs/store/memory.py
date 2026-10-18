@@ -10,7 +10,15 @@ import dataclasses
 import threading
 import time
 
-from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+from acs.domain.models import (
+    Device,
+    DmPendingPackage,
+    DmSession,
+    OtpChallenge,
+    SmsMessage,
+    Subscriber,
+    TokenRecord,
+)
 from acs.store.base import OtpIssueRefused
 
 
@@ -35,6 +43,7 @@ class MemoryStore:
         self._tokens: dict[str, TokenRecord] = {}
         self._devices: dict[str, Device] = {}
         self._dm_sessions: dict[str, DmSession] = {}
+        self._dm_pending: dict[str, DmPendingPackage] = {}
         self._sms: list[SmsMessage] = []
 
     # ---- subscribers ------------------------------------------------------
@@ -157,6 +166,22 @@ class MemoryStore:
     def delete_dm_session(self, session_id: str) -> None:
         with self._lock:
             self._dm_sessions.pop(session_id, None)
+
+    def put_dm_pending(self, pending: DmPendingPackage) -> None:
+        with self._lock:
+            self._dm_pending[pending.session_id] = pending
+
+    def get_dm_pending(self, session_id: str) -> DmPendingPackage | None:
+        with self._lock:
+            pending = self._dm_pending.get(session_id)
+            if pending and pending.expires_at and pending.expires_at < int(time.time()):
+                self._dm_pending.pop(session_id, None)
+                return None
+            return pending
+
+    def delete_dm_pending(self, session_id: str) -> None:
+        with self._lock:
+            self._dm_pending.pop(session_id, None)
 
     # ---- SMS outbox -------------------------------------------------------
     def record_sms(self, message: SmsMessage) -> None:

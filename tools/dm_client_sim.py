@@ -3,8 +3,10 @@
 
 Runs a complete SyncML DM 1.2 session against the ACS and checks the server's
 behaviour: authentication challenge handling, ``Status`` codes, the ``Get``
-inventory request, and the ``Replace`` commands that carry the VoLTE / IMS
-configuration.
+inventory request, the ``Replace`` commands that carry the VoLTE / IMS
+configuration, and that no server message is larger than the client's
+``MaxMsgSize``. A package split across messages is followed with ``Alert`` 1222;
+``--max-msg-size`` makes the server split.
 
 Usage::
 
@@ -81,6 +83,7 @@ class DmClientSimulator:
         timeout: float = 10.0,
         verify_tls: bool = True,
         wbxml: bool = False,
+        max_msg_size: int = 16384,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.dm_path = dm_path
@@ -89,6 +92,8 @@ class DmClientSimulator:
         self.password = password
         self.auth = auth
         self.wbxml = wbxml
+        self.max_msg_size = max_msg_size
+        self.largest_message = 0
         self.manufacturer = manufacturer
         self.model = model
         self.sw_version = sw_version
@@ -150,7 +155,9 @@ class DmClientSimulator:
             ElementTree.SubElement(meta, "Type", {"xmlns": METINF_NS}).text = auth_type
             ElementTree.SubElement(cred, "Data").text = data
         meta = ElementTree.SubElement(header, "Meta")
-        ElementTree.SubElement(meta, "MaxMsgSize", {"xmlns": METINF_NS}).text = "16384"
+        ElementTree.SubElement(meta, "MaxMsgSize", {"xmlns": METINF_NS}).text = str(
+            self.max_msg_size
+        )
         body = ElementTree.SubElement(root, "SyncBody")
         return root, body
 
@@ -208,6 +215,33 @@ class DmClientSimulator:
             if media_type != DM_WBXML_CONTENT_TYPE:
                 raise dm_wbxml.WbxmlError("server did not return the requested WBXML content type")
         return response
+
+    def exchange(self, root: Any) -> tuple[httpx.Response, dict[str, Any]]:
+        """Send a package and follow the server's answer to its ``Final``.
+
+        Each message of a split answer is acknowledged and the next one requested
+        with ``Alert`` 1222. That request is not marked ``Final``: the client's
+        own package is not complete until the server's is.
+        """
+        response = self.post(self._serialise(root))
+        self.largest_message = max(self.largest_message, len(response.content))
+        parsed = self.parse(response.content)
+        while response.status_code == 200 and not parsed["final"]:
+            root, body = self._envelope()
+            self._add_status(body, 1, str(self.msg_id - 1), "0", "SyncHdr")
+            self._add_alert(body, 2, "1222")
+            response = self.post(self._serialise(root))
+            self.largest_message = max(self.largest_message, len(response.content))
+            following = self.parse(response.content)
+            for key in ("statuses", "gets"):
+                parsed[key] += following[key]
+            parsed["replaces"].update(following["replaces"])
+            parsed["final"] = following["final"]
+            parsed["challenge"] = following["challenge"] or parsed["challenge"]
+            parsed["replace_cmd_ref"] = following.get(
+                "replace_cmd_ref", parsed.get("replace_cmd_ref")
+            )
+        return response, parsed
 
     # ---------------------------------------------------------------- parsing
     def parse(self, payload: bytes) -> dict[str, Any]:
@@ -279,9 +313,8 @@ def run_session(sim: DmClientSimulator, checker: Checker) -> None:
         ["./DevInfo/DevId", "./DevInfo/Man", "./DevInfo/Mod", "./DevInfo/DmV", "./DevInfo/Lang"],
     )
     ElementTree.SubElement(body, "Final")
-    response = sim.post(sim._serialise(root))
+    response, parsed = sim.exchange(root)
     checker.check(response.status_code == 200, f"server answered 200, got {response.status_code}")
-    parsed = sim.parse(response.content)
 
     if parsed["challenge"] or any(s["code"] == "401" for s in parsed["statuses"]):
         print("  server issued an authentication challenge; retrying with credentials")
@@ -291,8 +324,7 @@ def run_session(sim: DmClientSimulator, checker: Checker) -> None:
         sim._add_alert(body, 1, "1201")
         sim._add_replace(body, 2, ["./DevInfo/DevId", "./DevInfo/Man", "./DevInfo/Mod"])
         ElementTree.SubElement(body, "Final")
-        response = sim.post(sim._serialise(root))
-        parsed = sim.parse(response.content)
+        response, parsed = sim.exchange(root)
 
     hdr_status = next((s for s in parsed["statuses"] if s["cmd"] == "SyncHdr"), None)
     checker.check(
@@ -308,9 +340,8 @@ def run_session(sim: DmClientSimulator, checker: Checker) -> None:
     sim._add_status(body, 1, str(sim.msg_id - 1), "0", "SyncHdr")
     sim._add_results(body, 2, "2", requested)
     ElementTree.SubElement(body, "Final")
-    response = sim.post(sim._serialise(root))
+    response, parsed = sim.exchange(root)
     checker.check(response.status_code == 200, "server answered 200 to the results package")
-    parsed = sim.parse(response.content)
     sim.received = parsed["replaces"]
     checker.check(bool(sim.received), "server pushed configuration with Replace")
 
@@ -336,11 +367,15 @@ def run_session(sim: DmClientSimulator, checker: Checker) -> None:
     sim._add_status(body, 1, str(sim.msg_id - 1), "0", "SyncHdr")
     sim._add_status(body, 2, str(sim.msg_id - 1), parsed.get("replace_cmd_ref", "1"), "Replace")
     ElementTree.SubElement(body, "Final")
-    response = sim.post(sim._serialise(root))
+    response, parsed = sim.exchange(root)
     checker.check(response.status_code == 200, "server answered 200 to the final package")
-    parsed = sim.parse(response.content)
     checker.check(parsed["final"], "server closed the session with Final and no new commands")
     checker.check(not parsed["gets"], "no further commands were issued")
+    checker.check(
+        sim.largest_message <= sim.max_msg_size,
+        f"no server message exceeded MaxMsgSize {sim.max_msg_size} "
+        f"(largest {sim.largest_message} bytes)",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -352,6 +387,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--password", required=True, help="DM password from the w7 characteristic")
     parser.add_argument("--auth", choices=["basic", "md5", "none"], default="basic")
     parser.add_argument("--wbxml", action="store_true", help="send and receive WBXML SyncML")
+    parser.add_argument(
+        "--max-msg-size",
+        type=int,
+        default=16384,
+        help="MaxMsgSize to advertise; a small value makes the server split its packages",
+    )
     parser.add_argument("--insecure", action="store_true")
     args = parser.parse_args(argv)
 
@@ -365,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
         auth=args.auth,
         verify_tls=not args.insecure,
         wbxml=args.wbxml,
+        max_msg_size=args.max_msg_size,
     )
     print(f"OMA-DM endpoint under test: {args.base_url}{args.dm_path}")
     try:

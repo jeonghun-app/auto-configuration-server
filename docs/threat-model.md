@@ -144,6 +144,40 @@ deploy script warns that the service is HTTP-only. Responses carry
 Residual: the template permits an HTTP-only deployment. Deliberate, so the stack
 can be exercised without a domain, and warned about at deploy time.
 
+### T14 — DM session state amplification
+
+*A small DM request that makes the server store and rewrite much more than it
+sent.* (T13 is reserved for the SMSC entry in #55.)
+
+Every command in a DM message is owed a `Status`, and what does not fit the
+client's `MaxMsgSize` is stored until the client asks for it with `Alert` 1222.
+Each of those requests rewrites the stored remainder. Mitigations:
+
+- The remainder is a record of its own (`DmPendingPackage`), read and written
+  only after the message authenticated. A message without valid credentials
+  rewrites only the session record, a few hundred bytes, as it did before
+  splitting existed
+  (`tests/test_dm_message_size.py::test_a_message_that_fails_authentication_never_reads_or_rewrites_the_remainder`).
+- One message may ask for at most 100 acknowledgements, one package may take at
+  most 128 messages, and the stored remainder is capped at 32 KiB. Each limit
+  answers `413` (`DmTooLarge`) and is tested; see
+  [oma-dm.md](oma-dm.md#resource-limits).
+- The remainder expires with its session (`ACS_DM_SESSION_TTL_SECONDS`, 600 s).
+  Continuations do not extend it.
+
+Residual: one valid DM credential can make each request rewrite up to 32 KiB.
+That per-request bound holds. The 128-message cap is not a firm per-package
+bound: the counter is read, incremented and written back without a conditional
+write, so concurrent continuations of one session can lose increments and run
+past it. Opening a new session with another `SessionID` starts again anyway. The
+total is therefore bounded by 32 KiB per request times the request rate, and the
+default stack has no WAF (residual risk 4). A per-device DM rate limit and an
+alarm on `DmPackageContinued` are tracked in #65.
+
+`ACS_DM_AUTH_SCHEME=none` turns DM authentication off and makes all of this
+anonymous. The template does not set it, so the default `basic` applies, but
+startup validation does not refuse it in staging or prod yet (#61).
+
 ## Explicitly accepted residual risks
 
 1. Response timing may distinguish a known from an unknown subscriber.
@@ -154,6 +188,8 @@ can be exercised without a domain, and warned about at deploy time.
 6. GBA is not real, so a client that only supports GBA cannot be provisioned.
 7. 91 of 116 OMA-CP parameters are not cross-checked against a licensed spec
    edition, so a name could be wrong and a handset would silently ignore it.
+8. One valid DM credential can make the server rewrite up to 32 KiB per request
+   while a split package lasts (T14).
 
 ## Reporting
 

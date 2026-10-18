@@ -1,0 +1,750 @@
+"""Server packages are split into messages no larger than the client's MaxMsgSize.
+
+The client's limit is on the bytes it receives, so every assertion here measures
+the encoded body that would go on the wire, in XML and in WBXML.
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from copy import deepcopy
+
+import pytest
+from tests.conftest import TEST_IMEI, TEST_IMSI, TEST_MSISDN
+from tests.test_conformance_protocol import cred, package
+
+from acs.config import Settings
+from acs.domain.models import DmPendingPackage, DmSession, Subscriber
+from acs.protocol.omadm import package as omadm_package
+from acs.protocol.omadm import syncml, wbxml
+from acs.protocol.omadm.session import DmResponse, DmService
+from acs.store.memory import MemoryStore
+
+DM_PASSWORD = "dm-secret-123"
+SESSION_KEY = f"{TEST_IMEI}:42"
+INIT_BODY = (
+    "    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>\n"
+    "    <Replace><CmdID>2</CmdID><Item><Source><LocURI>./DevInfo/Man</LocURI></Source>"
+    "<Data>SimCorp</Data></Item></Replace>"
+)
+ENCODINGS = pytest.mark.parametrize("binary", [False, True], ids=["xml", "wbxml"])
+#: Limits that split the init and configuration packages. WBXML needs a smaller
+#: one: the same package is about a quarter of the size of its XML form.
+SMALL: dict[bool, int] = {False: 1500, True: 400}
+#: Below the smallest message any stage needs (833 bytes of XML, 208 of WBXML at
+#: the time of writing), so no message the server could send would fit.
+TOO_SMALL: dict[bool, int] = {False: 600, True: 150}
+
+
+def next_message_body(msg_ref: int, extra: str = "") -> str:
+    return (
+        f"    <Status><CmdID>1</CmdID><MsgRef>{msg_ref}</MsgRef><CmdRef>0</CmdRef>"
+        "<Cmd>SyncHdr</Cmd><Data>200</Data></Status>\n"
+        f"{extra}"
+        "    <Alert><CmdID>9</CmdID><Data>1222</Data></Alert>"
+    )
+
+
+def closing_body(msg_ref: int, code: str = "200") -> str:
+    """The client's last package: the Status for the configuration Replace."""
+    return (
+        f"    <Status><CmdID>1</CmdID><MsgRef>{msg_ref}</MsgRef><CmdRef>2</CmdRef>"
+        f"<Cmd>Replace</Cmd><Data>{code}</Data></Status>"
+    )
+
+
+class Client:
+    """A DM client that honours its own MaxMsgSize and follows split packages."""
+
+    def __init__(self, dm: DmService, limit: int, binary: bool) -> None:
+        self.dm = dm
+        self.limit = limit
+        self.binary = binary
+        self.msg_id = 0
+        self.sizes: list[int] = []
+        self.bodies: list[bytes] = []
+
+    def send(self, body: str, authenticated: bool = True) -> DmResponse:
+        self.msg_id += 1
+        credential = cred() if authenticated else None
+        xml = package(self.msg_id, body, credential=credential, max_msg_size=self.limit)
+        if self.binary:
+            return self.dm.handle(wbxml.encode(xml), syncml.CONTENT_TYPE_WBXML)
+        return self.dm.handle(xml, syncml.CONTENT_TYPE_XML)
+
+    def parse(self, outcome: DmResponse) -> syncml.SyncMlMessage:
+        self.sizes.append(len(outcome.body))
+        self.bodies.append(outcome.body)
+        return read(outcome, self.binary, self.limit)
+
+    def exchange(self, body: str) -> list[syncml.SyncMlMessage]:
+        """Send *body*, then ask with Alert 1222 until the server's package is final."""
+        messages = [self.parse(self.send(body))]
+        while not messages[-1].final:
+            messages.append(self.parse(self.send(next_message_body(self.msg_id))))
+        return messages
+
+
+def read(outcome: DmResponse, binary: bool, limit: int) -> syncml.SyncMlMessage:
+    assert outcome.status_code == 200, outcome.detail
+    assert len(outcome.body) <= limit
+    return syncml.parse(wbxml.decode(outcome.body) if binary else outcome.body)
+
+
+def items_of(messages: list[syncml.SyncMlMessage], name: str) -> list[tuple[str, str]]:
+    return [(item.uri, item.data) for m in messages for c in m.of(name) for item in c.items]
+
+
+def results_for(uris: list[str]) -> str:
+    items = "".join(
+        f"<Item><Source><LocURI>{uri}</LocURI></Source><Data>v-{uri.rsplit('/', 1)[-1]}</Data>"
+        "</Item>"
+        for uri in uris
+    )
+    return f"    <Results><CmdID>2</CmdID><MsgRef>1</MsgRef><CmdRef>1</CmdRef>{items}</Results>\n"
+
+
+def run_session(client: Client) -> tuple[list[list[syncml.SyncMlMessage]], DmResponse]:
+    """Drive init, inventory and configuration, then close; return each package."""
+    inventory = client.exchange(INIT_BODY)
+    uris = [uri for uri, _ in items_of(inventory, "Get")]
+    configuration = client.exchange(next_message_body(client.msg_id, results_for(uris)))
+    closing = client.send(closing_body(client.msg_id))
+    return [inventory, configuration, [client.parse(closing)]], closing
+
+
+@pytest.fixture
+def dm_store(store: MemoryStore) -> MemoryStore:
+    store.put_subscriber(Subscriber(imsi=TEST_IMSI, msisdn=TEST_MSISDN, dm_password=DM_PASSWORD))
+    return store
+
+
+@pytest.fixture
+def dm(settings: Settings, dm_store: MemoryStore) -> DmService:
+    return DmService(settings, dm_store)
+
+
+class CountingStore(MemoryStore):
+    """Counts what the DM service reads and writes, per kind of record."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+
+    def get_dm_pending(self, session_id: str) -> DmPendingPackage | None:
+        self.calls.append("get_dm_pending")
+        return super().get_dm_pending(session_id)
+
+    def put_dm_pending(self, pending: DmPendingPackage) -> None:
+        self.calls.append("put_dm_pending")
+        super().put_dm_pending(pending)
+
+    def delete_dm_pending(self, session_id: str) -> None:
+        self.calls.append("delete_dm_pending")
+        super().delete_dm_pending(session_id)
+
+    def put_dm_session(self, session: DmSession) -> None:
+        self.calls.append(f"put_dm_session:{len(json.dumps(session.to_item()))}")
+        super().put_dm_session(session)
+
+
+def fresh_service(settings: Settings, dm_store: MemoryStore) -> DmService:
+    store = MemoryStore()
+    subscriber = dm_store.get_subscriber(TEST_IMSI)
+    assert subscriber is not None
+    store.put_subscriber(deepcopy(subscriber))
+    return DmService(settings, store)
+
+
+# ------------------------------------------------------ OMADM-SIZE-SPLITTING
+@pytest.mark.spec
+@pytest.mark.parametrize(
+    ("binary", "limit"),
+    [(False, 1500), (False, 4096), (True, 400), (True, 1024)],
+    ids=["xml-1500", "xml-4096", "wbxml-400", "wbxml-1024"],
+)
+def test_no_message_of_a_whole_session_exceeds_the_client_max_msg_size(
+    settings: Settings, dm_store: MemoryStore, binary: bool, limit: int
+) -> None:
+    whole = Client(fresh_service(settings, dm_store), 16384, binary)
+    expected, _ = run_session(whole)
+    assert [len(p) for p in expected] == [1, 1, 1], "the reference session must not split"
+    if binary:
+        # A package that fits is the same on the wire in both encodings.
+        as_xml = Client(fresh_service(settings, dm_store), 16384, False)
+        run_session(as_xml)
+        assert whole.bodies == [wbxml.encode(body) for body in as_xml.bodies]
+
+    dm = DmService(settings, dm_store)
+    client = Client(dm, limit, binary)
+    packages, closing = run_session(client)
+
+    assert max(client.sizes) <= limit
+    assert len(packages[1]) > 1, "the configuration push must have been split"
+    for messages in packages:
+        assert [m.final for m in messages] == [False] * (len(messages) - 1) + [True]
+    # The split package carries the same commands, in the same order.
+    for name in ("Get", "Add", "Replace"):
+        assert items_of(packages[0] + packages[1], name) == items_of(
+            expected[0] + expected[1], name
+        )
+    assert closing.metric == "DmSessionComplete"
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    device = dm_store.get_device(TEST_IMEI)
+    assert device is not None and device.sw_version == "v-SwV"
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_every_received_command_is_acknowledged_once_across_a_split_package(
+    dm: DmService, binary: bool
+) -> None:
+    most = omadm_package.MAX_ACKNOWLEDGED_COMMANDS
+    body = "    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>\n" + "".join(
+        f"    <Replace><CmdID>{i}</CmdID></Replace>\n" for i in range(2, most + 1)
+    )
+    client = Client(dm, 2048, binary)
+    messages = client.exchange(body)
+
+    assert len(messages) > 2
+    acknowledged = [
+        s.cmd_ref
+        for m in messages
+        for s in m.of("Status")
+        if s.msg_ref == "1" and s.cmd != "SyncHdr"
+    ]
+    assert acknowledged == [str(i) for i in range(1, most + 1)]
+    # Each continuation request is itself acknowledged, in the reply to it.
+    for msg_id, message in enumerate(messages[1:], start=2):
+        refs = {(s.msg_ref, s.cmd) for s in message.of("Status")}
+        assert {(str(msg_id), "SyncHdr"), (str(msg_id), "Alert")} <= refs
+    # CmdID is unique per message, so every message numbers its commands afresh.
+    for message in messages:
+        assert [c.cmd_id for c in message.commands] == list(range(1, len(message.commands) + 1))
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_a_message_exactly_at_max_msg_size_is_sent_whole_and_one_byte_less_is_split(
+    settings: Settings, dm_store: MemoryStore, binary: bool
+) -> None:
+    def first_message(limit: int) -> DmResponse:
+        return Client(fresh_service(settings, dm_store), limit, binary).send(INIT_BODY)
+
+    # The header advertises the limit, so the whole message's size depends on how
+    # many digits the limit has. Converge on the size that advertises itself.
+    size = len(first_message(16384).body)
+    for _ in range(3):
+        size = len(first_message(size).body)
+    whole = first_message(size)
+    assert len(whole.body) == size
+    assert read(whole, binary, size).final
+
+    split = first_message(size - 1)
+    assert not read(split, binary, size - 1).final
+    assert len(split.body) < size
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_a_continuation_does_not_advance_the_session_phase(
+    dm: DmService, dm_store: MemoryStore, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    first = client.parse(client.send(INIT_BODY))
+    assert not first.final
+    session = dm_store.get_dm_session(SESSION_KEY)
+    assert session is not None and session.phase == "devinfo"
+    assert dm_store.get_dm_pending(SESSION_KEY) is not None
+
+    while True:
+        message = client.parse(client.send(next_message_body(client.msg_id)))
+        assert not message.of("Add", "Replace"), "configuration must wait for the inventory"
+        session = dm_store.get_dm_session(SESSION_KEY)
+        assert session is not None and session.phase == "devinfo"
+        if message.final:
+            break
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+    pushed = client.exchange(next_message_body(client.msg_id, results_for(["./DevDetail/SwV"])))
+    assert items_of(pushed, "Replace")
+
+
+# --------------------------------------------------------- OMADM-ALERT-1222
+@pytest.mark.spec
+@ENCODINGS
+def test_statuses_and_results_sent_with_alert_1222_are_not_lost(
+    dm: DmService, dm_store: MemoryStore, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    inventory = client.exchange(INIT_BODY)
+    uris = [uri for uri, _ in items_of(inventory, "Get")]
+    first = client.parse(client.send(next_message_body(client.msg_id, results_for(uris))))
+    assert not first.final
+    failed = (
+        f"    <Status><CmdID>2</CmdID><MsgRef>{client.msg_id}</MsgRef><CmdRef>2</CmdRef>"
+        "<Cmd>Replace</Cmd><Data>500</Data></Status>\n"
+        "    <Results><CmdID>3</CmdID><MsgRef>1</MsgRef><CmdRef>1</CmdRef><Item><Source>"
+        "<LocURI>./DevDetail/FwV</LocURI></Source><Data>FW-2</Data></Item></Results>\n"
+    )
+    message = client.parse(client.send(next_message_body(client.msg_id, failed)))
+    while not message.final:
+        message = client.parse(client.send(next_message_body(client.msg_id)))
+    closing = client.send(closing_body(client.msg_id))
+
+    assert closing.metric == "DmSessionCompleteWithErrors"
+    assert closing.detail == "failures:1"
+    device = dm_store.get_device(TEST_IMEI)
+    assert device is not None and device.mo_values["./DevDetail/FwV"] == "FW-2"
+
+
+@pytest.mark.spec
+@pytest.mark.parametrize("code", ["1223", "1226"])
+def test_ending_a_session_mid_package_discards_the_remainder(
+    dm: DmService, dm_store: MemoryStore, code: str
+) -> None:
+    client = Client(dm, 1500, False)
+    assert not client.parse(client.send(INIT_BODY)).final
+    outcome = client.send(f"    <Alert><CmdID>1</CmdID><Data>{code}</Data></Alert>")
+    message = client.parse(outcome)
+    assert message.final and outcome.session_finished
+    assert not message.of("Get")
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_a_closing_package_that_does_not_fit_ends_the_session_with_its_last_message(
+    dm: DmService, dm_store: MemoryStore, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    inventory = client.exchange(INIT_BODY)
+    uris = [uri for uri, _ in items_of(inventory, "Get")]
+    client.exchange(next_message_body(client.msg_id, results_for(uris)))
+    # Sixty commands in the last client package are owed sixty statuses.
+    extra = "".join(f"    <Replace><CmdID>{i}</CmdID></Replace>\n" for i in range(3, 63))
+
+    first = client.send(closing_body(client.msg_id) + "\n" + extra)
+    assert first.metric == "DmPackageContinued" and not first.session_finished
+    messages = [client.parse(first)]
+    session = dm_store.get_dm_session(SESSION_KEY)
+    assert session is not None and session.phase == "done"
+    assert dm_store.get_dm_pending(SESSION_KEY) is not None
+    while not messages[-1].final:
+        outcome = client.send(next_message_body(client.msg_id))
+        messages.append(client.parse(outcome))
+
+    assert outcome.metric == "DmSessionComplete" and outcome.session_finished
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    acknowledged = [s.cmd_ref for m in messages for s in m.of("Status") if s.cmd == "Replace"]
+    assert acknowledged == [str(i) for i in range(3, 63)]
+    assert not any(m.of("Get", "Add", "Replace") for m in messages)
+
+
+# ------------------------------------------------ authentication mid-package
+@pytest.mark.spec
+@ENCODINGS
+def test_a_message_that_fails_authentication_never_reads_or_rewrites_the_remainder(
+    settings: Settings, binary: bool
+) -> None:
+    store = CountingStore()
+    store.put_subscriber(Subscriber(imsi=TEST_IMSI, msisdn=TEST_MSISDN, dm_password=DM_PASSWORD))
+    client = Client(DmService(settings, store), SMALL[binary], binary)
+    assert not client.parse(client.send(INIT_BODY)).final
+    before = deepcopy(store.get_dm_pending(SESSION_KEY))
+    assert before is not None
+
+    for _ in range(3):
+        store.calls.clear()
+        outcome = client.send(next_message_body(client.msg_id), authenticated=False)
+        assert outcome.metric == "DmAuthRejected"
+        # Only the small session record is written: the challenge nonce changes.
+        assert [c.partition(":")[0] for c in store.calls] == ["put_dm_session"]
+        assert int(store.calls[0].partition(":")[2]) < 1024
+    assert store.get_dm_pending(SESSION_KEY) == before
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_a_challenge_mid_package_carries_final_and_the_package_resumes_after_it(
+    settings: Settings, dm_store: MemoryStore, binary: bool
+) -> None:
+    uninterrupted = Client(fresh_service(settings, dm_store), SMALL[binary], binary)
+    expected = uninterrupted.exchange(INIT_BODY)
+
+    client = Client(DmService(settings, dm_store), SMALL[binary], binary)
+    first = client.parse(client.send(INIT_BODY))
+    challenge = client.parse(client.send(next_message_body(client.msg_id), authenticated=False))
+    # The challenge is a package of its own: the server has nothing more to say
+    # until the client authenticates, so it ends with Final.
+    assert challenge.final
+    assert [s.data for s in challenge.of("Status")] == [syncml.STATUS_MISSING_CREDENTIALS]
+    assert not challenge.of("Get")
+    rest = [client.parse(client.send(next_message_body(client.msg_id)))]
+    while not rest[-1].final:
+        rest.append(client.parse(client.send(next_message_body(client.msg_id))))
+    assert items_of([first, *rest], "Get") == items_of(expected, "Get")
+
+
+# ------------------------------------------------------- resource limits
+@pytest.mark.spec
+@ENCODINGS
+def test_more_commands_than_one_message_may_acknowledge_are_refused_and_change_nothing(
+    dm: DmService, dm_store: MemoryStore, caplog: pytest.LogCaptureFixture, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    assert not client.parse(client.send(INIT_BODY)).final
+    before_session = deepcopy(dm_store.get_dm_session(SESSION_KEY))
+    before_pending = deepcopy(dm_store.get_dm_pending(SESSION_KEY))
+    extra = "".join(
+        f"    <Replace><CmdID>{i}</CmdID></Replace>\n"
+        for i in range(10, 10 + omadm_package.MAX_ACKNOWLEDGED_COMMANDS)
+    )
+
+    outcome = client.send(next_message_body(client.msg_id, extra))
+
+    assert outcome.status_code == 413
+    assert outcome.metric == "DmTooLarge" and outcome.detail == "too_many_commands"
+    assert not outcome.body
+    assert dm_store.get_dm_session(SESSION_KEY) == before_session
+    assert dm_store.get_dm_pending(SESSION_KEY) == before_pending
+    assert "dm message carries too many commands" in caplog.messages
+
+
+@pytest.mark.spec
+def test_a_package_that_needs_too_many_messages_is_abandoned_with_its_session(
+    dm: DmService, dm_store: MemoryStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(omadm_package, "MAX_MESSAGES_PER_PACKAGE", 3)
+    client = Client(dm, SMALL[False], False)
+    body = "    <Alert><CmdID>1</CmdID><Data>1201</Data></Alert>\n" + "".join(
+        f"    <Replace><CmdID>{i}</CmdID></Replace>\n" for i in range(2, 40)
+    )
+    assert not client.parse(client.send(body)).final
+    for _ in range(2):
+        assert not client.parse(client.send(next_message_body(client.msg_id))).final
+
+    outcome = client.send(next_message_body(client.msg_id))
+
+    assert outcome.status_code == 413
+    assert outcome.metric == "DmTooLarge" and outcome.detail == "too_many_messages"
+    assert outcome.session_finished and not outcome.body
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_an_abandoned_remainder_expires_with_its_session(
+    dm: DmService, dm_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    assert not client.parse(client.send(INIT_BODY)).final
+    session = dm_store.get_dm_session(SESSION_KEY)
+    pending = dm_store.get_dm_pending(SESSION_KEY)
+    assert session is not None and pending is not None
+    # The table TTL is the only thing that removes a remainder whose client went
+    # away mid-package, so the record must carry the session's expiry.
+    assert pending.expires_at == session.expires_at > time.time()
+
+    later = session.expires_at + 1
+    monkeypatch.setattr(time, "time", lambda: later)
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+
+
+# ------------------------------------------------------ partial store writes
+class FailingStore(MemoryStore):
+    """Fails the next save of one kind of record, once, after nothing else."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail: str | None = None
+
+    def _maybe_fail(self, record: str) -> None:
+        if self.fail == record:
+            self.fail = None
+            raise RuntimeError(f"simulated store failure saving the {record}")
+
+    def put_dm_pending(self, pending: DmPendingPackage) -> None:
+        self._maybe_fail("remainder")
+        super().put_dm_pending(pending)
+
+    def put_dm_session(self, session: DmSession) -> None:
+        self._maybe_fail("session")
+        super().put_dm_session(session)
+
+
+class RetryingClient(Client):
+    """Makes one request hit a store failure, then resends it as a device would."""
+
+    def __init__(
+        self, dm: DmService, store: FailingStore, limit: int, binary: bool, fail_on: int
+    ) -> None:
+        super().__init__(dm, limit, binary)
+        self.store = store
+        self.fail_on = fail_on
+        self.record = ""
+        self.requests = 0
+
+    def send(self, body: str, authenticated: bool = True) -> DmResponse:
+        self.requests += 1
+        if self.requests == self.fail_on:
+            self.store.fail = self.record
+            with pytest.raises(RuntimeError, match="simulated store failure"):
+                super().send(body, authenticated)
+            assert self.store.fail is None, "the failure must have been reached"
+            self.msg_id -= 1
+        return super().send(body, authenticated)
+
+
+@pytest.mark.spec
+@ENCODINGS
+@pytest.mark.parametrize("record", ["remainder", "session"])
+@pytest.mark.parametrize("stage", ["inventory", "configuration", "continuation"])
+def test_a_store_write_that_fails_once_loses_nothing_when_the_device_retries(
+    settings: Settings, dm_store: MemoryStore, binary: bool, record: str, stage: str
+) -> None:
+    reference = Client(fresh_service(settings, dm_store), SMALL[binary], binary)
+    expected, _ = run_session(reference)
+    assert len(expected[0]) > 1 and len(expected[1]) > 1, "both packages must split"
+    fail_on = {"inventory": 1, "continuation": 2, "configuration": len(expected[0]) + 1}[stage]
+
+    store = FailingStore()
+    subscriber = dm_store.get_subscriber(TEST_IMSI)
+    assert subscriber is not None
+    store.put_subscriber(deepcopy(subscriber))
+    client = RetryingClient(DmService(settings, store), store, SMALL[binary], binary, fail_on)
+    client.record = record
+    packages, closing = run_session(client)
+
+    # Every item arrives exactly once: nothing skipped, nothing repeated.
+    for name in ("Get", "Add", "Replace"):
+        assert items_of(packages[0] + packages[1], name) == items_of(
+            expected[0] + expected[1], name
+        )
+    assert closing.metric == "DmSessionComplete"
+    assert store.get_dm_session(SESSION_KEY) is None
+    assert store.get_dm_pending(SESSION_KEY) is None
+
+
+# ------------------------------------------------------ catalogue headroom
+@pytest.mark.spec
+def test_the_shipped_catalogue_leaves_headroom_under_every_package_limit(
+    settings: Settings, dm_store: MemoryStore
+) -> None:
+    """A catalogue grows by YAML alone. This fails in CI before growth can push a
+    real session into a 413 halfway through its configuration."""
+    assert len(fresh_service(settings, dm_store).tree.device_query_uris()) + 16 <= (
+        omadm_package.MAX_ACKNOWLEDGED_COMMANDS
+    )
+
+    def session_at(limit: int) -> tuple[list[list[syncml.SyncMlMessage]], int] | None:
+        store = MemoryStore()
+        subscriber = dm_store.get_subscriber(TEST_IMSI)
+        assert subscriber is not None
+        store.put_subscriber(deepcopy(subscriber))
+        client = Client(DmService(settings, store), limit, False)
+        largest = 0
+        original = client.send
+
+        def send(body: str, authenticated: bool = True) -> DmResponse:
+            nonlocal largest
+            outcome = original(body, authenticated)
+            pending = store.get_dm_pending(SESSION_KEY)
+            if pending is not None:
+                largest = max(largest, len(json.dumps(pending.entries, separators=(",", ":"))))
+            return outcome
+
+        client.send = send  # type: ignore[method-assign]
+        try:
+            packages, closing = run_session(client)
+        except AssertionError:
+            return None
+        return (packages, largest) if closing.metric == "DmSessionComplete" else None
+
+    # The smallest MaxMsgSize a whole XML session completes with is the worst case
+    # for the number of messages per package.
+    low, high = TOO_SMALL[False], 16384
+    assert session_at(low) is None and session_at(high) is not None
+    while high - low > 1:
+        middle = (low + high) // 2
+        if session_at(middle) is None:
+            low = middle
+        else:
+            high = middle
+    worst = session_at(high)
+    assert worst is not None
+    packages, largest = worst
+    assert max(len(p) for p in packages) <= omadm_package.MAX_MESSAGES_PER_PACKAGE // 2
+    assert largest <= omadm_package.MAX_STORED_BYTES // 2
+
+
+# ---------------------------------------------------- mixed-release deploys
+@pytest.mark.spec
+def test_a_remainder_left_behind_by_an_older_release_is_discarded(
+    dm: DmService, dm_store: MemoryStore
+) -> None:
+    """An older task answers the 1222 as the inventory Results and pushes the
+    configuration in one message. It moves the phase on and never sees the
+    remainder, which must not resurface in the next package."""
+    client = Client(dm, SMALL[False], False)
+    assert not client.parse(client.send(INIT_BODY)).final
+    pending = dm_store.get_dm_pending(SESSION_KEY)
+    assert pending is not None and pending.phase == "devinfo"
+    session = deepcopy(dm_store.get_dm_session(SESSION_KEY))
+    assert session is not None
+    session.phase = "configure"
+    dm_store.put_dm_session(session)
+    client.msg_id += 1
+
+    closing = client.send(closing_body(client.msg_id))
+
+    message = client.parse(closing)
+    assert message.final and not message.of("Get", "Add", "Replace")
+    assert closing.metric == "DmSessionComplete"
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+
+
+def test_a_package_that_fits_is_built_once() -> None:
+    builds: list[int] = []
+
+    def build(count: int) -> bytes:
+        builds.append(count)
+        return b"x" * (100 + count)
+
+    assert omadm_package.fill(build, 40, 16384, 1) == (b"x" * 140, 40)
+    assert builds == [40]
+    builds.clear()
+    body, sent = omadm_package.fill(build, 40, 120, 1)
+    assert (len(body), sent) == (120, 20)
+    assert max(builds[1:]) <= 2 * 20 + 1, "only sizes near the fit are serialised"
+
+
+# -------------------------------------------- a message that can never fit
+@pytest.mark.spec
+@ENCODINGS
+@pytest.mark.parametrize("stage", ["challenge", "init", "continuation"])
+def test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing(
+    dm: DmService,
+    dm_store: MemoryStore,
+    caplog: pytest.LogCaptureFixture,
+    binary: bool,
+    stage: str,
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    body = INIT_BODY
+    if stage == "continuation":
+        assert not client.parse(client.send(INIT_BODY)).final
+        body = next_message_body(client.msg_id)
+    before_session = deepcopy(dm_store.get_dm_session(SESSION_KEY))
+    before_pending = deepcopy(dm_store.get_dm_pending(SESSION_KEY))
+    before_device = deepcopy(dm_store.get_device(TEST_IMEI))
+
+    client.limit = TOO_SMALL[binary]
+    outcome = client.send(body, authenticated=stage != "challenge")
+
+    assert outcome.status_code == 400
+    if stage == "challenge":
+        # Reachable without credentials, so it must not share the metric an
+        # alarm would watch.
+        assert outcome.metric == "DmChallengeTooLarge"
+        assert outcome.detail == "challenge_exceeds_max_msg_size"
+        assert "dm challenge does not fit the client MaxMsgSize" in caplog.messages
+    else:
+        assert outcome.metric == "DmMessageTooLarge"
+        assert outcome.detail == "message_exceeds_max_msg_size"
+        assert "dm message does not fit the client MaxMsgSize" in caplog.messages
+    assert not outcome.body and not outcome.session_finished
+    assert dm_store.get_dm_session(SESSION_KEY) == before_session
+    assert dm_store.get_dm_pending(SESSION_KEY) == before_pending
+    assert dm_store.get_device(TEST_IMEI) == before_device
+
+    client.limit = SMALL[binary]
+    client.msg_id -= 1
+    assert client.send(body, authenticated=stage != "challenge").status_code == 200
+
+
+@pytest.mark.spec
+@ENCODINGS
+@pytest.mark.parametrize("stage", ["init", "continuation"])
+def test_at_the_smallest_workable_max_msg_size_the_message_fits_and_moves_the_package_on(
+    settings: Settings, dm_store: MemoryStore, binary: bool, stage: str
+) -> None:
+    def answer(limit: int) -> DmResponse:
+        """The server's answer to *stage* when the client advertises *limit*."""
+        store = MemoryStore()
+        subscriber = dm_store.get_subscriber(TEST_IMSI)
+        assert subscriber is not None
+        store.put_subscriber(deepcopy(subscriber))
+        client = Client(DmService(settings, store), SMALL[binary], binary)
+        body = INIT_BODY
+        if stage == "continuation":
+            assert not client.parse(client.send(INIT_BODY)).final
+            body = next_message_body(client.msg_id)
+        before = deepcopy(store.get_dm_pending(SESSION_KEY))
+        client.limit = limit
+        outcome = client.send(body)
+        after = store.get_dm_pending(SESSION_KEY)
+        if stage == "continuation" and outcome.status_code == 200:
+            assert before is not None and after is not None
+            # A continuation that only acknowledged the request would leave the
+            # remainder as it was, and client and server would loop forever.
+            assert len(after.entries) < len(before.entries)
+        return outcome
+
+    # Search for the threshold rather than hard-code it, so the test survives
+    # catalogue changes.
+    low, high = TOO_SMALL[binary], SMALL[binary]
+    assert answer(low).status_code == 400
+    assert answer(high).status_code == 200
+    while high - low > 1:
+        middle = (low + high) // 2
+        if answer(middle).status_code == 200:
+            high = middle
+        else:
+            low = middle
+
+    refused = answer(high - 1)
+    assert refused.status_code == 400 and refused.metric == "DmMessageTooLarge"
+    fitted = answer(high)
+    message = read(fitted, binary, high)
+    assert not message.final
+    if stage == "init":
+        # One entry of the package: the acknowledgement of the client's Alert.
+        assert [s.cmd for s in message.of("Status")] == ["SyncHdr", "Alert"]
+    else:
+        assert message.of("Get"), "a continuation must carry part of the remainder"
+
+
+# ------------------------------------------------------ OMADM-SEC-BODY-LIMIT
+def test_a_remainder_too_large_to_store_is_refused_and_changes_nothing(
+    dm: DmService, dm_store: MemoryStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Each acknowledgement echoes the command's URI, so the most commands one
+    # message may carry, each with a long URI, would need more than the budget.
+    uri = "./" + "가" * 200
+    body = "<Alert><CmdID>1</CmdID><Data>1201</Data></Alert>" + "".join(
+        f"<Replace><CmdID>{i}</CmdID><Item><Target><LocURI>{uri}</LocURI></Target></Item></Replace>"
+        for i in range(2, omadm_package.MAX_ACKNOWLEDGED_COMMANDS + 1)
+    )
+    wire = wbxml.encode(package(1, body, credential=cred()))
+    assert len(wire) < 4 * 16384
+
+    outcome = dm.handle(wire, syncml.CONTENT_TYPE_WBXML)
+
+    assert outcome.status_code == 413
+    assert outcome.metric == "DmTooLarge"
+    assert outcome.detail == "package_too_large"
+    assert not outcome.body
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+    assert dm_store.get_device(TEST_IMEI) is None
+    assert "dm package remainder exceeds the session budget" in caplog.messages
+
+
+def test_an_unknown_queued_command_is_a_programming_error() -> None:
+    builder = syncml.SyncMlBuilder(session_id="1", msg_id=1, target="IMEI:1", source="acs")
+    with pytest.raises(ValueError, match="Exec"):
+        omadm_package.apply(builder, [omadm_package.Item("Exec", "./DevInfo")])

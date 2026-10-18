@@ -177,6 +177,10 @@ class DmSession:
     authenticated: bool = False
     nonce: str = ""
     pending: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    """Unused. Kept so items written by older releases still load; the unsent
+    part of a package lives in :class:`DmPendingPackage`."""
+    reported_failures: int = 0
+    """Command failures the client has reported so far, across every message."""
     expires_at: int = 0
 
     def to_item(self) -> dict[str, Any]:
@@ -186,7 +190,41 @@ class DmSession:
     def from_item(cls, item: dict[str, Any]) -> DmSession:
         fields = {f.name for f in dataclasses.fields(cls)}
         kwargs = {k: v for k, v in item.items() if k in fields}
-        for key in ("last_msg_id", "server_cmd_id", "expires_at"):
+        for key in ("last_msg_id", "server_cmd_id", "reported_failures", "expires_at"):
+            if key in kwargs and kwargs[key] is not None:
+                kwargs[key] = int(kwargs[key])
+        return cls(**kwargs)
+
+
+@dataclasses.dataclass(slots=True)
+class DmPendingPackage:
+    """The unsent part of a server DM package, stored apart from its session.
+
+    It is a separate record, not a field of :class:`DmSession`, because the
+    session is read and written on every message, including ones that fail
+    authentication. Keeping a remainder of up to tens of kilobytes out of it
+    means only an authenticated message can make the server move it.
+    """
+
+    session_id: str
+    phase: str
+    """The session phase the remainder belongs to. A remainder whose phase no
+    longer matches the session's was left behind (for example by a task running
+    an older release) and is discarded."""
+    entries: list[list[str]] = dataclasses.field(default_factory=list)
+    """In the stored form of :func:`acs.protocol.omadm.package.to_stored`."""
+    messages: int = 1
+    """Messages of this package sent so far."""
+    expires_at: int = 0
+
+    def to_item(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_item(cls, item: dict[str, Any]) -> DmPendingPackage:
+        fields = {f.name for f in dataclasses.fields(cls)}
+        kwargs = {k: v for k, v in item.items() if k in fields}
+        for key in ("messages", "expires_at"):
             if key in kwargs and kwargs[key] is not None:
                 kwargs[key] = int(kwargs[key])
         return cls(**kwargs)

@@ -158,11 +158,24 @@ cannot originate the trigger.
 - **HTTP without a certificate.** `scripts/deploy.sh` warns loudly. Serving RCC.14
   over cleartext exposes IMSI, IMEI, MSISDN, OTP and tokens on the wire.
 
-## 10. DM responses are not split to fit `MaxMsgSize`
+## 10. DM message splitting stops at whole items
 
-The client's `MaxMsgSize` is read, and the server never advertises more than the
-client accepts, but a response is not split across messages to stay under it: a
-package with many commands is sent whole, in XML and in WBXML. A device that
-negotiates a `MaxMsgSize` of 16384 has been seen to receive a 231,588-byte XML
-response, which a client enforcing its limit may reject. The WBXML encoder's output limits are resource bounds,
-not message splitting. Tracked in #20.
+Server packages are split into messages that fit the client's `MaxMsgSize`, in XML
+and in WBXML (#20). Three cases are still not covered:
+
+- **No large objects.** One item is never chunked with `MoreData`. If the next
+  item cannot fit in a message, even alone, the request gets HTTP `400` with
+  `DmMessageTooLarge` and nothing is stored. With the shipped catalogue this needs
+  a `MaxMsgSize` below about 1.3 KB in XML or 370 bytes in WBXML.
+- **Client packages are not reassembled.** A client message without `Final` is
+  treated as a complete package; the server does not ask for the rest with
+  `Alert` 1222. Tracked in #49.
+- **Resource limits.** A message asking for more than 100 acknowledgements, or a
+  package needing more than 128 messages, is refused with `413`. No device seen
+  so far comes near either; see
+  [oma-dm.md](oma-dm.md#resource-limits).
+- **A lost answer is not repeated.** A client that resends a message because the
+  answer never arrived receives the next message of the package, so the lost one
+  is skipped. MsgID replay is not detected. Tracked in #50.
+
+See [oma-dm.md](oma-dm.md#message-size).

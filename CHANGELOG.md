@@ -19,9 +19,16 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wrote them (1.0.0 to 1.4.x) set `expires_at` to the send time plus 24 hours,
   and the stack has declared `expires_at` as the table's TTL attribute since
   1.0.0, so DynamoDB deletes them itself, usually within a few days of expiry.
-  Nothing reads them in the meantime.
+  No release after 1.4.x reads them.
 
 ### Upgrade notes
+
+This is a minor release although 1.3.x can no longer be upgraded from directly
+or rolled back to. Handsets, the admin API, the `ACS_*` settings and the data
+1.4.x reads are unchanged, the incompatibility is with 1.3.x alone, and its
+effect ends 24 hours after the last 1.3 send; see
+[docs/releasing.md](docs/releasing.md#versioning) and the
+[version decision on #28](https://github.com/jeonghun-app/auto-configuration-server/issues/28#issuecomment-6251191228).
 
 - **Upgrade from 1.4.x only.** Rolling from 1.3.x directly to this release is
   unsupported. 1.3 tasks count the daily OTP cap from `OTPSEND#` rows, which the

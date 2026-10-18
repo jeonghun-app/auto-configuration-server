@@ -179,7 +179,8 @@ counted from.
 
 `issue_otp` reads and writes only the challenge and `OTPQUOTA#<msisdn>`. It
 neither writes nor queries `OTPSEND#` rows, and `MemoryStore` keeps a single send
-list as before. The supported upgrade path to the release after 1.4 (1.5.0) is
+list as before. The supported upgrade path to the release after 1.4 (1.5.0, a
+minor release under the rule in [releasing.md](../releasing.md#versioning)) is
 through 1.4.x, run for at least 24 hours after the last 1.3 task stops: by then
 1.4 has carried every 1.3 send that still counts into the quota item, or the
 send has aged out of the window.

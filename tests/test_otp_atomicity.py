@@ -137,6 +137,18 @@ def test_the_daily_cap_counts_sends_in_the_last_24_hours(otp_store: Store) -> No
     assert otp_store.issue_otp(challenge(later, otp_hash="h4"), 0, 2, later) is None
 
 
+def test_a_send_exactly_24_hours_old_still_counts(otp_store: Store) -> None:
+    # Both stores must put the window edge in the same place, or the cap would
+    # depend on the backend.
+    assert otp_store.issue_otp(challenge(), 0, 1, NOW) is None
+    exactly = NOW + 86400
+    assert otp_store.issue_otp(challenge(exactly, otp_hash="h2"), 0, 1, exactly) == (
+        OtpIssueRefused("daily_quota", 3600)
+    )
+    after = NOW + 86401
+    assert otp_store.issue_otp(challenge(after, otp_hash="h3"), 0, 1, after) is None
+
+
 def test_replace_succeeds_only_against_the_challenge_that_was_read(otp_store: Store) -> None:
     otp_store.issue_otp(challenge(), 60, 5, NOW)
     read = otp_store.get_otp(TEST_MSISDN)
@@ -428,23 +440,34 @@ def test_issue_neither_queries_nor_writes_legacy_send_rows(
     dynamo_store: DynamoDbStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     dynamo_store._table.put_item(Item=legacy_send_row(NOW - 60))
+    # Spied on the client, which every Table call goes through, so a read that
+    # bypasses the resource layer is caught too.
+    client = dynamo_store._table.meta.client
     queries: list[dict[str, Any]] = []
+    read: list[str] = []
     written: list[str] = []
-    original_query = dynamo_store._table.query
-    original_transact = dynamo_store._table.meta.client.transact_write_items
+    original_query = client.query
+    original_get = client.get_item
+    original_transact = client.transact_write_items
 
     def spy_query(**kwargs: Any) -> Any:
         queries.append(kwargs)
         return original_query(**kwargs)
 
+    def spy_get(**kwargs: Any) -> Any:
+        read.append(str(kwargs["Key"]["pk"]))
+        return original_get(**kwargs)
+
     def spy_transact(**kwargs: Any) -> Any:
         written.extend(str(item["Put"]["Item"]["pk"]) for item in kwargs["TransactItems"])
         return original_transact(**kwargs)
 
-    monkeypatch.setattr(dynamo_store._table, "query", spy_query)
-    monkeypatch.setattr(dynamo_store._table.meta.client, "transact_write_items", spy_transact)
+    monkeypatch.setattr(client, "query", spy_query)
+    monkeypatch.setattr(client, "get_item", spy_get)
+    monkeypatch.setattr(client, "transact_write_items", spy_transact)
     assert dynamo_store.issue_otp(challenge(), 60, 5, NOW) is None
     assert queries == []
+    assert sorted(read) == [f"OTP#{TEST_MSISDN}", f"OTPQUOTA#{TEST_MSISDN}"]
     assert sorted(written) == [f"OTP#{TEST_MSISDN}", f"OTPQUOTA#{TEST_MSISDN}"]
 
 
@@ -463,6 +486,22 @@ def test_legacy_send_rows_do_not_count_towards_the_daily_cap(
     assert dynamo_store.issue_otp(challenge(last, otp_hash="h3"), 60, 2, last) == (
         OtpIssueRefused("daily_quota", 3600)
     )
+
+
+@pytest.mark.parametrize(
+    "otp_store", [pytest.param("dynamodb", marks=pytest.mark.aws)], indirect=True
+)
+def test_concurrent_issues_with_legacy_rows_present_spend_exactly_the_cap(
+    otp_store: Store,
+) -> None:
+    assert isinstance(otp_store, DynamoDbStore)
+    for stamp in (NOW - 3600, NOW - 60, NOW - 1):
+        otp_store._table.put_item(Item=legacy_send_row(stamp))
+    # A request loses a round only to one that sent. With a cap below the five
+    # write rounds, every request therefore either sends or meets the cap.
+    outcomes = race(THREADS, lambda: otp_store.issue_otp(challenge(), 0, 3, NOW))
+    assert outcomes.count(None) == 3
+    assert len(legacy_send_rows(otp_store)) == 3
 
 
 def test_distinct_sends_in_the_same_second_each_spend_the_daily_quota(otp_store: Store) -> None:

@@ -17,11 +17,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the wire. The session keeps its phase and the unsent part until the package
   is complete, and `Results` or failure statuses sent with `Alert` 1222 are still
   recorded. If even the smallest next message cannot fit, the answer is `400`
-  with `DmMessageTooLarge` and nothing is stored; items are not chunked as large
-  objects. A request owed more acknowledgements than the 256 KiB session budget
-  can hold gets `413` with `DmTooLarge`. `tools/dm_client_sim.py --max-msg-size`
-  exercises it, and `scripts/verify_stack.py` now runs a second DM session at
-  1500 bytes. See [docs/oma-dm.md](docs/oma-dm.md#message-size). (#20)
+  with `DmMessageTooLarge` (`DmChallengeTooLarge` for an authentication
+  challenge) and nothing is stored; items are not chunked as large objects. The
+  unsent part is stored beside the session, read only for authenticated
+  messages. A message may ask for at most 100 acknowledgements, a package may
+  take at most 128 messages, and the stored part is capped at 32 KiB; each limit
+  answers `413` with `DmTooLarge`. `tools/dm_client_sim.py --max-msg-size`
+  exercises splitting, and `scripts/verify_stack.py` now runs a second DM
+  session at 1500 bytes. See [docs/oma-dm.md](docs/oma-dm.md#message-size).
+  (#20)
 
 ## [1.4.0] — 2026-10-04
 

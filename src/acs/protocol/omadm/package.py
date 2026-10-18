@@ -27,11 +27,24 @@ from acs.protocol.omadm.syncml import SyncMlBuilder
 
 STATUS: Final = "Status"
 
-#: Budget for the stored remainder, measured as compact JSON. A DynamoDB item is
-#: limited to 400 KB, and the rest of the session item needs well under 1 KB.
-#: Compact JSON over-counts DynamoDB's size for lists of strings, so the budget
-#: is conservative. Thousands of acknowledgements fit within it.
-MAX_STORED_BYTES: Final = 256 * 1024
+#: Client commands one message may ask the server to acknowledge. A device
+#: sends a handful per message (Alert, Replace, Results); acknowledgements are
+#: the only part of a package a client controls, so this bounds what a request
+#: can make the server store.
+MAX_ACKNOWLEDGED_COMMANDS: Final = 100
+
+#: Messages one package may take. Every continuation rewrites the stored
+#: remainder, so this bounds that work per package. The longest legitimate
+#: package measured, MAX_ACKNOWLEDGED_COMMANDS acknowledgements plus the
+#: inventory Get at the smallest workable XML MaxMsgSize (about 1.3 KB), took 55.
+MAX_MESSAGES_PER_PACKAGE: Final = 128
+
+#: Budget for the stored remainder, measured as compact JSON, which over-counts
+#: DynamoDB's size for lists of strings. The largest legitimate remainders
+#: measured are about 5.5 KB (MAX_ACKNOWLEDGED_COMMANDS acknowledgements and the
+#: inventory Get) and 2.5 KB (the shipped catalogue), so this leaves room for a
+#: larger catalogue while bounding what each continuation rewrites.
+MAX_STORED_BYTES: Final = 32 * 1024
 
 
 class Status(NamedTuple):
@@ -142,23 +155,30 @@ def fill(build: Callable[[int], bytes], count: int, limit: int, required: int) -
     :class:`MessageTooLarge` is raised: sending it anyway would break the limit,
     and sending fewer would let the package stall.
 
-    The search gallops and then bisects, so a long queue is never serialised
-    whole just to send the part of it that fits.
+    Most packages fit, so the whole queue is tried first and costs one build.
+    Otherwise the search gallops up from *required* and then bisects, so a long
+    queue is serialised only around the size that fits.
     """
+    if count > required:
+        whole = build(count)
+        if len(whole) <= limit:
+            return whole, count
     best = build(required)
     if len(best) > limit:
         raise MessageTooLarge(len(best), limit)
     fits = required
-    too_many = count + 1
+    # The smallest count known not to fit. Reaching here with count > required
+    # means the whole queue did not.
+    too_many = count if count > required else count + 1
     step = 1
-    while fits < count and too_many == count + 1:
-        probe = min(fits + step, count)
+    while fits + step < too_many:
+        probe = fits + step
         body = build(probe)
-        if len(body) <= limit:
-            fits, best = probe, body
-            step *= 2
-        else:
+        if len(body) > limit:
             too_many = probe
+            break
+        fits, best = probe, body
+        step *= 2
     while too_many - fits > 1:
         probe = (fits + too_many) // 2
         body = build(probe)

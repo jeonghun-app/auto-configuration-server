@@ -17,9 +17,11 @@ The server drives a three-stage session:
 
 Each answer is a package, and a package larger than the client's ``MaxMsgSize``
 goes out as several messages (see :mod:`acs.protocol.omadm.package`). While a
-package is incomplete the session holds the remainder in ``DmSession.pending``
-and stays in its phase; the client's next messages, normally ``Alert`` 1222,
-are answered from the remainder until the message that carries ``Final``.
+package is incomplete the session stays in its phase and the remainder is kept
+in a :class:`~acs.domain.models.DmPendingPackage` beside it; the client's next
+messages, normally ``Alert`` 1222, are answered from the remainder until the
+message that carries ``Final``. The remainder is read and written only for
+authenticated messages.
 
 Session state lives in the shared store, not in process memory, so a session can
 survive being load balanced across ECS tasks mid-flow.
@@ -34,7 +36,7 @@ from copy import deepcopy
 from typing import Final
 
 from acs.config import Settings
-from acs.domain.models import Device, DmSession
+from acs.domain.models import Device, DmPendingPackage, DmSession
 from acs.observability import get_logger
 from acs.protocol.identity import derive_identity
 from acs.protocol.omadm import auth as dm_auth
@@ -88,6 +90,8 @@ class DmResponse:
 class _DmChanges:
     session: DmSession | None = None
     device: Device | None = None
+    pending: DmPendingPackage | None = None
+    delete_pending_id: str = ""
     delete_session_id: str = ""
 
     def commit(self, store: Store) -> None:
@@ -95,8 +99,17 @@ class _DmChanges:
             store.put_device(self.device)
         if self.session is not None:
             store.put_dm_session(self.session)
+        if self.delete_pending_id:
+            store.delete_dm_pending(self.delete_pending_id)
+        if self.pending is not None:
+            store.put_dm_pending(self.pending)
         if self.delete_session_id:
             store.delete_dm_session(self.delete_session_id)
+            store.delete_dm_pending(self.delete_session_id)
+
+
+class _ChallengeTooLarge(package.MessageTooLarge):
+    """An authentication challenge does not fit; reachable without credentials."""
 
 
 class DmService:
@@ -151,10 +164,22 @@ class DmService:
                 status_code=500, metric="DmEncodingError", detail="response_encoding_failed"
             )
         except package.PackageTooLarge as exc:
-            # Thousands of commands in one request each need a Status, and what
-            # does not fit the next message has to be stored until it does.
+            # What does not fit the next message has to be stored until it does.
+            # Only very long client URIs or override values get here.
             log.warning("dm package remainder exceeds the session budget", extra={"size": exc.size})
             return DmResponse(status_code=413, metric="DmTooLarge", detail="package_too_large")
+        except _ChallengeTooLarge as exc:
+            # Kept apart from DmMessageTooLarge: anyone can cause this one without
+            # credentials, so an alarm on DmMessageTooLarge must not count it.
+            log.warning(
+                "dm challenge does not fit the client MaxMsgSize",
+                extra={"limit": exc.limit, "size": exc.size},
+            )
+            return DmResponse(
+                status_code=400,
+                metric="DmChallengeTooLarge",
+                detail="challenge_exceeds_max_msg_size",
+            )
         except package.MessageTooLarge as exc:
             # 4xx, not 5xx: the limit comes from the request, and a client must not
             # be able to set off the 5xx alarm by advertising a tiny MaxMsgSize.
@@ -206,6 +231,30 @@ class DmService:
             session.imsi = auth_result.username
         session.last_msg_id = int(header.msg_id) if header.msg_id.isdigit() else 0
 
+        commands = len(self._acks(message))
+        if commands > package.MAX_ACKNOWLEDGED_COMMANDS:
+            # Every acknowledgement that does not fit the next message is stored
+            # and rewritten on each continuation, so the count is capped.
+            log.warning(
+                "dm message carries too many commands",
+                extra={"session": session.wire_session_id, "commands": commands},
+            )
+            return DmResponse(status_code=413, metric="DmTooLarge", detail="too_many_commands")
+
+        # Read only now: a message that failed authentication never loads or
+        # rewrites the remainder.
+        pending = deepcopy(self._store.get_dm_pending(session.session_id))
+        if pending is not None and pending.phase != session.phase:
+            # A task running an older release answered in between and moved the
+            # phase on without knowing about the remainder. It belongs to a
+            # package that is over.
+            log.info(
+                "dm stale package remainder discarded",
+                extra={"session": session.wire_session_id, "phase": pending.phase},
+            )
+            changes.delete_pending_id = session.session_id
+            pending = None
+
         if message.has_alert(ALERT_SESSION_ABORT):
             # The client is abandoning the session; acknowledge and drop the
             # state, including any unsent part of a package, rather than
@@ -232,8 +281,8 @@ class DmService:
                 session_finished=True,
             )
 
-        if session.pending:
-            return self._continue_package(message, session, changes, encode)
+        if pending is not None:
+            return self._continue_package(message, session, pending, changes, encode)
         if session.phase == "init":
             return self._handle_init(message, session, changes, encode)
         if session.phase == "devinfo":
@@ -258,8 +307,8 @@ class DmService:
 
         uris = self._tree.device_query_uris()
         queue = self._acks(message) + [package.Item("Get", uri) for uri in uris]
-        body = self._start_package(message, session, queue, encode)
         session.phase = "devinfo"
+        body, remaining = self._start_package(message, session, queue, encode, changes)
         changes.session = session
 
         log.info(
@@ -268,7 +317,7 @@ class DmService:
                 "session": session.wire_session_id,
                 "device_id": session.device_id,
                 "gets": len(uris),
-                "pending": len(session.pending),
+                "pending": remaining,
             },
         )
         return DmResponse(
@@ -294,8 +343,8 @@ class DmService:
             + [package.Item("Add", uri, "", "node", "node") for uri in interiors]
             + [package.Item("Replace", *value) for value in values]
         )
-        body = self._start_package(message, session, queue, encode)
         session.phase = "configure"
+        body, remaining = self._start_package(message, session, queue, encode, changes)
         changes.session = session
 
         log.info(
@@ -305,7 +354,7 @@ class DmService:
                 "device_id": session.device_id,
                 "nodes": len(values),
                 "interior_nodes": len(interiors),
-                "pending": len(session.pending),
+                "pending": remaining,
             },
         )
         return DmResponse(
@@ -334,15 +383,22 @@ class DmService:
         self, message: SyncMlMessage, session: DmSession, changes: _DmChanges, encode: Encoder
     ) -> DmResponse:
         self._record_failures(message, session)
-        body = self._start_package(message, session, self._acks(message), encode)
         session.phase = "done"
-        if session.pending:
+        body, remaining = self._start_package(
+            message, session, self._acks(message), encode, changes
+        )
+        if remaining:
             changes.session = session
-            return self._continued(body, session)
+            return self._continued(body, remaining)
         return self._close(body, session, changes)
 
     def _continue_package(
-        self, message: SyncMlMessage, session: DmSession, changes: _DmChanges, encode: Encoder
+        self,
+        message: SyncMlMessage,
+        session: DmSession,
+        pending: DmPendingPackage,
+        changes: _DmChanges,
+        encode: Encoder,
     ) -> DmResponse:
         """Answer from the unsent part of the package, without changing phase.
 
@@ -350,7 +406,24 @@ class DmService:
         answered the same way: until the package is complete the server has
         nothing else it may send. Results and statuses that arrive with the
         request are still recorded, so splitting cannot lose them.
+
+        A package that needs more than
+        :data:`~acs.protocol.omadm.package.MAX_MESSAGES_PER_PACKAGE` messages is
+        abandoned with ``413`` and the session deleted: a legitimate client never
+        needs that many, and each one rewrites the stored remainder.
         """
+        if pending.messages >= package.MAX_MESSAGES_PER_PACKAGE:
+            log.warning(
+                "dm package exceeded the message limit",
+                extra={"session": session.wire_session_id, "messages": pending.messages},
+            )
+            changes.delete_session_id = session.session_id
+            return DmResponse(
+                status_code=413,
+                metric="DmTooLarge",
+                detail="too_many_messages",
+                session_finished=True,
+            )
         changes.device = self._absorb_device_values(message, session)
         if session.phase in _CONFIGURATION_PHASES:
             self._record_failures(message, session)
@@ -360,15 +433,20 @@ class DmService:
         body, rest = self._next_message(
             message,
             session,
-            acks + package.from_stored(session.pending),
+            acks + package.from_stored(pending.entries),
             encode,
             required=len(acks) + 1,
         )
-        session.pending = package.to_stored(rest)
-        if not session.pending and session.phase == "done":
-            return self._close(body, session, changes)
+        if rest:
+            pending.entries = package.to_stored(rest)
+            pending.messages += 1
+            changes.pending = pending
+        else:
+            changes.delete_pending_id = session.session_id
+            if session.phase == "done":
+                return self._close(body, session, changes)
         changes.session = session
-        return self._continued(body, session)
+        return self._continued(body, len(rest))
 
     def _record_failures(self, message: SyncMlMessage, session: DmSession) -> None:
         # 418 means the node was already there, which is the expected answer to an
@@ -391,12 +469,12 @@ class DmService:
         )
 
     @staticmethod
-    def _continued(body: bytes, session: DmSession) -> DmResponse:
+    def _continued(body: bytes, remaining: int) -> DmResponse:
         return DmResponse(
             status_code=200,
             body=body,
             metric="DmPackageContinued",
-            detail=f"pending:{len(session.pending)}",
+            detail=f"pending:{remaining}",
         )
 
     @staticmethod
@@ -456,14 +534,17 @@ class DmService:
             if auth_result.reason == "missing_credentials"
             else STATUS_INVALID_CREDENTIALS
         )
-        body, _ = self._next_message(
-            message,
-            session,
-            [],
-            encode,
-            required=0,
-            header=(code, (scheme, auth_result.challenge_nonce)),
-        )
+        try:
+            body, _ = self._next_message(
+                message,
+                session,
+                [],
+                encode,
+                required=0,
+                header=(code, (scheme, auth_result.challenge_nonce)),
+            )
+        except package.MessageTooLarge as exc:
+            raise _ChallengeTooLarge(exc.size, exc.limit) from exc
         log.info(
             "dm authentication rejected",
             extra={"session": session.wire_session_id, "reason": auth_result.reason},
@@ -539,13 +620,25 @@ class DmService:
         session: DmSession,
         queue: Sequence[package.Entry],
         encode: Encoder,
-    ) -> bytes:
-        """Send the first message of a new package; keep the rest on *session*."""
+        changes: _DmChanges,
+    ) -> tuple[bytes, int]:
+        """Send the first message of a new package and keep the rest.
+
+        The remainder is recorded against the phase *session* is now in, which
+        is the phase the client's next message will find. Returns the message
+        and the number of entries left for later messages.
+        """
         body, rest = self._next_message(
             message, session, queue, encode, required=min(1, len(queue))
         )
-        session.pending = package.to_stored(rest)
-        return body
+        if rest:
+            changes.pending = DmPendingPackage(
+                session_id=session.session_id,
+                phase=session.phase,
+                entries=package.to_stored(rest),
+                expires_at=session.expires_at,
+            )
+        return body, len(rest)
 
     def _last_message(self, message: SyncMlMessage, session: DmSession, encode: Encoder) -> bytes:
         """Acknowledge *message* in one final message; the session ends with it."""

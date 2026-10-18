@@ -28,7 +28,15 @@ import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import ClientError
 
-from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+from acs.domain.models import (
+    Device,
+    DmPendingPackage,
+    DmSession,
+    OtpChallenge,
+    SmsMessage,
+    Subscriber,
+    TokenRecord,
+)
 from acs.observability import get_logger
 from acs.store.base import OtpIssueRefused, OtpStoreContention
 
@@ -44,7 +52,12 @@ _OTP_WRITE_ROUNDS = 5
 
 
 def _clean(value: Any) -> Any:
-    """Convert DynamoDB numbers back to plain ints and drop empty strings."""
+    """Convert DynamoDB numbers back to plain ints and floats, recursively.
+
+    Strings, empty ones included, are returned unchanged: stored DM package
+    rows are positional, so dropping an empty field would shift the ones after
+    it.
+    """
     if isinstance(value, Decimal):
         return int(value) if value == value.to_integral_value() else float(value)
     if isinstance(value, dict):
@@ -396,6 +409,27 @@ class DynamoDbStore:
 
     def delete_dm_session(self, session_id: str) -> None:
         self._delete(f"DMSESS#{session_id}", "META")
+
+    # The remainder shares the session's partition but not its item, so reading
+    # or writing the session never touches it. Its own expires_at lets the table
+    # TTL remove one that a task running an older release left behind.
+    def put_dm_pending(self, pending: DmPendingPackage) -> None:
+        item = pending.to_item()
+        item.update({"pk": f"DMSESS#{pending.session_id}", "sk": "PENDING", "entity": "dm_pending"})
+        self._put(item)
+
+    def get_dm_pending(self, session_id: str) -> DmPendingPackage | None:
+        item = self._get(f"DMSESS#{session_id}", "PENDING")
+        if not item:
+            return None
+        pending = DmPendingPackage.from_item(item)
+        if pending.expires_at and pending.expires_at < int(time.time()):
+            self.delete_dm_pending(session_id)
+            return None
+        return pending
+
+    def delete_dm_pending(self, session_id: str) -> None:
+        self._delete(f"DMSESS#{session_id}", "PENDING")
 
     # ---- SMS outbox -------------------------------------------------------
     def record_sms(self, message: SmsMessage) -> None:

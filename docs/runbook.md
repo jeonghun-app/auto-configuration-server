@@ -233,10 +233,34 @@ managed until it advertises more, because large objects are not implemented. If
 `size` is large and the device's limit is normal, look for a subscriber override
 with a very long value.
 
-`DmTooLarge` with detail `package_too_large` (HTTP `413`) is a request with
-several thousand commands, whose remaining acknowledgements would exceed the
-256 KiB session budget (`dm package remainder exceeds the session budget`). No
-real DM client sends that; treat repeats from one source as probing.
+`DmChallengeTooLarge` (HTTP `400`) is the same failure on an authentication
+challenge. It needs no credentials, so it is not evidence of a broken device and
+is not worth an alarm.
+
+`DmTooLarge` (HTTP `413`) has four details, logged as `detail` in the
+`dm package handled` entry:
+
+| Detail | Meaning |
+| --- | --- |
+| `payload_too_large` | The request body is over `ACS_DM_MAX_MSG_SIZE * 4` |
+| `too_many_commands` | One message asked for more than 100 acknowledgements (`dm message carries too many commands`) |
+| `too_many_messages` | A split package needed more than 128 messages; the session was deleted (`dm package exceeded the message limit`) |
+| `package_too_large` | The unsent part of a package would exceed 32 KiB (`dm package remainder exceeds the session budget`) |
+
+No device seen so far comes near any of these, so the normal rate of
+`DmTooLarge` (namespace `RcsAcs`) is zero. A sustained rate is someone holding a
+DM credential, or a client bug. The service cannot tell you who: access logs are
+off and session ids are masked. Count which detail it is:
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '{ $.outcome = "DmTooLarge" }' --max-items 200 \
+  --query 'events[].message' --output text | grep -o '"detail": "[a-z_]*"' | sort | uniq -c
+```
+
+Then contain it as for OTP abuse: narrow `AllowedCidr` on the stack or attach a
+WAF rate-based rule. See [threat-model.md](threat-model.md) T14.
 
 `DmPackageContinued` is normal: a split package continuing on the device's
 `Alert` 1222. See [oma-dm.md](oma-dm.md#message-size).
@@ -276,6 +300,12 @@ and the `--smpp-*` flags; anything left out reverts to the script's default (see
 previous image is still in ECR. The service deploys with
 `MinimumHealthyPercent: 100` and the circuit breaker enabled, so a bad rollout
 rolls itself back.
+
+Rolling back past the release that split DM packages (#20): a DM session that is
+mid-package when an older task answers it may be recorded as
+`DmSessionComplete` after the device received only part of its configuration.
+The older task ignores the stored remainder; it expires with the session. The
+device gets the full configuration in its next session.
 
 ## Adding a provisioning parameter
 

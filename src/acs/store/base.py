@@ -10,7 +10,15 @@ from __future__ import annotations
 import dataclasses
 from typing import Literal, Protocol, runtime_checkable
 
-from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+from acs.domain.models import (
+    Device,
+    DmPendingPackage,
+    DmSession,
+    OtpChallenge,
+    SmsMessage,
+    Subscriber,
+    TokenRecord,
+)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -86,6 +94,9 @@ class Store(Protocol):
     def put_dm_session(self, session: DmSession) -> None: ...
     def get_dm_session(self, session_id: str) -> DmSession | None: ...
     def delete_dm_session(self, session_id: str) -> None: ...
+    def put_dm_pending(self, pending: DmPendingPackage) -> None: ...
+    def get_dm_pending(self, session_id: str) -> DmPendingPackage | None: ...
+    def delete_dm_pending(self, session_id: str) -> None: ...
 
     # ---- mock SMS outbox (dev only) --------------------------------------
     def record_sms(self, message: SmsMessage) -> None: ...

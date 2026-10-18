@@ -100,8 +100,14 @@ device                                            ACS
 - `CmdID` restarts at 1 in every message. A `Status` keeps the `MsgRef` of the
   message that carried the command it answers, which may be an earlier one.
 - The session stays in its phase until the package is complete. The unsent part
-  is stored on the session (`DmSession.pending`), so the next message can be
-  served by any task.
+  is stored in the session store as a record of its own beside the session
+  (`DmPendingPackage`), so the next message can be served by any task. It is
+  read and written only for authenticated messages; a message that fails
+  authentication rewrites only the small session record, as before splitting
+  existed.
+- The record notes the phase it belongs to. If the session has moved to another
+  phase, for example because a task running an older release answered in
+  between, the record is discarded rather than sent.
 - Any client message that arrives while a package is incomplete is answered with
   the next message of that package, whether or not it carries `Alert` 1222.
   `Results` and `Status` sent with it are recorded: inventory values are saved,
@@ -110,6 +116,11 @@ device                                            ACS
   one more entry of the package, so a package always finishes.
 - `Alert` 1223 or 1226 discards the unsent part. Their answer, and every
   authentication challenge, must fit in one message.
+- An authentication challenge (`Status` 401 or 407 with `Chal`) that arrives
+  while a package is incomplete carries `Final`. It is a complete package of its
+  own: the server has nothing more to say until the client authenticates. The
+  unsent part stays stored, and the client's next authenticated message gets
+  the next message of the package.
 
 ### When a message cannot fit
 
@@ -120,16 +131,34 @@ item, the answer is HTTP `400` with the `DmMessageTooLarge` metric and an empty
 body. Nothing is stored, so the client can retry with a larger `MaxMsgSize`.
 
 It is a `4xx` because the limit comes from the request. A `5xx` would let any
-client trigger the `<stack>-5xx` alarm by advertising a tiny `MaxMsgSize`.
+client trigger the `<stack>-5xx` alarm by advertising a tiny `MaxMsgSize`. When
+the message that does not fit is an authentication challenge, the metric is
+`DmChallengeTooLarge` instead, with the detail
+`challenge_exceeds_max_msg_size`. A client without credentials can cause that
+one, so an alarm should watch `DmMessageTooLarge` only.
 Catalogue values are a few hundred bytes at most. With the shipped catalogue, a
 whole session completes with a `MaxMsgSize` of about 1.3 KB in XML and about
 370 bytes in WBXML.
 
-The unsent part of a package is limited to 256 KiB, measured as compact JSON, so
-that a session always fits in a DynamoDB item (400 KB). Only a request with
-several thousand commands, each owed a `Status`, reaches it. It is refused with
-HTTP `413`, the `DmTooLarge` metric and the detail `package_too_large`, and
-nothing is stored.
+### Resource limits
+
+Every continuation rewrites the stored remainder, so what one client can make
+the server store and rewrite is bounded. Each limit is a named constant in
+`src/acs/protocol/omadm/package.py`. Each answer is HTTP `413` with the
+`DmTooLarge` metric and an empty body:
+
+| Limit | Value | Detail | What happens |
+| --- | --- | --- | --- |
+| Commands one message may ask to be acknowledged (`MAX_ACKNOWLEDGED_COMMANDS`) | 100 | `too_many_commands` | Nothing is stored; the session is unchanged |
+| Messages in one package (`MAX_MESSAGES_PER_PACKAGE`) | 128 | `too_many_messages` | The session and its remainder are deleted |
+| Stored remainder, as compact JSON (`MAX_STORED_BYTES`) | 32 KiB | `package_too_large` | Nothing is stored; the session is unchanged |
+
+A device sends a handful of commands per message (`Status` is not
+acknowledged, so it does not count). The longest legitimate package measured,
+100 acknowledgements plus the inventory `Get` at the smallest workable XML
+`MaxMsgSize`, took 55 messages and stored about 5.5 KB. The shipped
+catalogue's remainder is about 2.5 KB. The stored remainder also always fits in
+a DynamoDB item (400 KB). See [threat-model.md](threat-model.md) T14.
 
 ## Authentication
 

@@ -27,6 +27,7 @@ from acs.app import create_app
 from acs.config import Settings
 from acs.domain.models import Subscriber
 from acs.protocol.omadm import auth as dm_auth
+from acs.protocol.omadm import package as omadm_package
 from acs.protocol.omadm import syncml, wbxml
 from acs.protocol.omadm.session import DmService
 from acs.store.memory import MemoryStore
@@ -121,17 +122,19 @@ async def test_wbxml_requests_preserve_state_through_a_complete_dm_session(
     assert device.imsi == TEST_IMSI
 
 
-async def test_six_thousand_replace_commands_receive_the_same_package_in_xml_and_wbxml(
+async def test_the_most_commands_a_message_may_carry_receive_the_same_package_in_xml_and_wbxml(
     settings: Settings, dm_store: MemoryStore
 ) -> None:
+    most = omadm_package.MAX_ACKNOWLEDGED_COMMANDS
     body = "<Alert><CmdID>1</CmdID><Data>1201</Data></Alert>" + "".join(
-        f"<Replace><CmdID>{i}</CmdID></Replace>" for i in range(2, 6002)
+        f"<Replace><CmdID>{i}</CmdID></Replace>" for i in range(2, most + 1)
     )
-    xml = package(1, body, cred=basic_cred())
-    wire = wbxml.encode(xml)
-    assert len(wire) < 64 * 1024
-    # The equivalent XML request is larger than the default 64 KiB body cap.
-    large_settings = settings.model_copy(update={"dm_max_msg_size": 128 * 1024})
+    # A small MaxMsgSize, so that both encodings have to split the package.
+    limit = 2048
+
+    def request(msg_id: int, text: str) -> bytes:
+        return package(msg_id, text, cred=basic_cred()).replace(b">16384<", f">{limit}<".encode())
+
     subscriber = dm_store.get_subscriber(TEST_IMSI)
     assert subscriber is not None
     packages: list[list[syncml.SyncMlMessage]] = []
@@ -139,7 +142,7 @@ async def test_six_thousand_replace_commands_receive_the_same_package_in_xml_and
         content_type = syncml.CONTENT_TYPE_WBXML if binary else syncml.CONTENT_TYPE_XML
         store = MemoryStore()
         store.put_subscriber(deepcopy(subscriber))
-        app = create_app(large_settings, store)
+        app = create_app(settings, store)
         messages: list[syncml.SyncMlMessage] = []
         async with (
             app.router.lifespan_context(app),
@@ -147,43 +150,47 @@ async def test_six_thousand_replace_commands_receive_the_same_package_in_xml_and
                 transport=httpx.ASGITransport(app=app), base_url="http://testserver"
             ) as client,
         ):
-            payload = wire if binary else xml
+            xml = request(1, body)
             while True:
                 response = await client.post(
-                    "/dm", content=payload, headers={"Content-Type": content_type}
+                    "/dm",
+                    content=wbxml.encode(xml) if binary else xml,
+                    headers={"Content-Type": content_type},
                 )
                 assert response.status_code == 200
                 assert response.headers["content-type"] == content_type
-                # The client advertised 16384; one message used to be 231,588 bytes.
-                assert len(response.content) <= 16384
+                assert len(response.content) <= limit
                 messages.append(
                     syncml.parse(wbxml.decode(response.content) if binary else response.content)
                 )
                 session = store.get_dm_session(SESSION_KEY)
                 assert session is not None and session.phase == "devinfo"
-                assert session.authenticated
+                assert session.authenticated and session.last_msg_id == len(messages)
                 if messages[-1].final:
                     break
                 alert = "<Alert><CmdID>1</CmdID><Data>1222</Data></Alert>"
-                next_xml = package(len(messages) + 1, alert, cred=basic_cred())
-                payload = wbxml.encode(next_xml) if binary else next_xml
+                xml = request(len(messages) + 1, alert)
         assert store.get_device(TEST_IMEI) is not None
         packages.append(messages)
 
     def package_content(messages: list[syncml.SyncMlMessage]) -> list[tuple[str, ...]]:
-        """The package's commands, without the per-message header acknowledgements."""
-        return [
-            (command.name, command.cmd, command.cmd_ref, command.data, *map(str, command.items))
-            for message in messages
-            for command in message.commands
-            if command.msg_ref == "1" or command.name == "Get"
-        ]
+        """The package's statuses and items, without the per-message header
+        acknowledgements. Items, not commands: each encoding splits the Get at a
+        different item."""
+        content: list[tuple[str, ...]] = []
+        for message in messages:
+            for command in message.commands:
+                if command.name == "Get":
+                    content += [("Get", str(item)) for item in command.items]
+                elif command.msg_ref == "1":
+                    content.append((command.name, command.cmd, command.cmd_ref, command.data))
+        return content
 
     for messages in packages:
         assert len(messages) > 1
         assert [m.final for m in messages] == [False] * (len(messages) - 1) + [True]
         statuses = [s for m in messages for s in m.of("Status") if s.msg_ref == "1"]
-        assert len(statuses) == 6002
+        assert len(statuses) == most + 1
         assert all(status.data == "200" for status in statuses[1:])
         assert messages[-1].of("Get")
     assert package_content(packages[0]) == package_content(packages[1])

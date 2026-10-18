@@ -170,6 +170,10 @@ and in WBXML (#20). Three cases are still not covered:
 - **Client packages are not reassembled.** A client message without `Final` is
   treated as a complete package; the server does not ask for the rest with
   `Alert` 1222. Tracked in #49.
+- **Resource limits.** A message asking for more than 100 acknowledgements, or a
+  package needing more than 128 messages, is refused with `413`. No device seen
+  so far comes near either; see
+  [oma-dm.md](oma-dm.md#resource-limits).
 - **A lost answer is not repeated.** A client that resends a message because the
   answer never arrived receives the next message of the package, so the lost one
   is skipped. MsgID replay is not detected. Tracked in #50.

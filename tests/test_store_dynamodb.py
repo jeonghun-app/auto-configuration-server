@@ -9,7 +9,15 @@ import boto3
 import pytest
 from moto import mock_aws
 
-from acs.domain.models import Device, DmSession, OtpChallenge, SmsMessage, Subscriber, TokenRecord
+from acs.domain.models import (
+    Device,
+    DmPendingPackage,
+    DmSession,
+    OtpChallenge,
+    SmsMessage,
+    Subscriber,
+    TokenRecord,
+)
 from acs.store.dynamodb import DynamoDbStore
 
 pytestmark = [pytest.mark.aws]
@@ -209,27 +217,51 @@ def test_dm_session_round_trip(ddb_store: DynamoDbStore) -> None:
     assert ddb_store.get_dm_session("42") is None
 
 
-def test_dm_session_keeps_the_unsent_part_of_a_package(ddb_store: DynamoDbStore) -> None:
-    # Empty strings are where a DynamoDB round trip most often goes wrong.
-    pending = [
-        ["Status", "Replace", "1", "7", "200", ""],
-        ["Replace", "./3GPP_IMS/1/Timer_T1", "2000", "int", ""],
-    ]
+def test_the_unsent_part_of_a_package_is_kept_beside_its_session(
+    ddb_store: DynamoDbStore,
+) -> None:
+    expires_at = int(time.time()) + 600
     ddb_store.put_dm_session(
         DmSession(
             session_id="42",
             device_id=IMEI,
             phase="configure",
-            pending=pending,
             reported_failures=2,
-            expires_at=int(time.time()) + 600,
+            expires_at=expires_at,
         )
     )
-    loaded = ddb_store.get_dm_session("42")
-    assert loaded is not None
-    assert loaded.pending == pending
-    assert loaded.reported_failures == 2
-    assert isinstance(loaded.reported_failures, int)
+    # Empty strings are where a DynamoDB round trip most often goes wrong.
+    entries = [
+        ["Status", "Replace", "1", "7", "200", ""],
+        ["Add", "./3GPP_IMS", "", "node", "node"],
+    ]
+    ddb_store.put_dm_pending(
+        DmPendingPackage(
+            session_id="42", phase="configure", entries=entries, messages=3, expires_at=expires_at
+        )
+    )
+
+    session = ddb_store.get_dm_session("42")
+    assert session is not None
+    assert session.reported_failures == 2 and isinstance(session.reported_failures, int)
+    # The session record the unauthenticated path rewrites carries none of it.
+    assert "Replace" not in str(session.to_item())
+    pending = ddb_store.get_dm_pending("42")
+    assert pending is not None
+    assert pending.entries == entries and pending.phase == "configure"
+    assert pending.messages == 3 and isinstance(pending.messages, int)
+
+    ddb_store.delete_dm_session("42")
+    assert ddb_store.get_dm_pending("42") is not None, "a separate item, deleted separately"
+    ddb_store.delete_dm_pending("42")
+    assert ddb_store.get_dm_pending("42") is None
+
+
+def test_an_expired_unsent_package_is_treated_as_absent(ddb_store: DynamoDbStore) -> None:
+    ddb_store.put_dm_pending(
+        DmPendingPackage(session_id="old", phase="devinfo", expires_at=int(time.time()) - 10)
+    )
+    assert ddb_store.get_dm_pending("old") is None
 
 
 def test_expired_dm_session_is_treated_as_absent(ddb_store: DynamoDbStore) -> None:

@@ -15,7 +15,7 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   SMS pumping (threat T5) to the rate limits and the account spending limit
   alone. It now names both dimensions, and a test compares it with the EMF the
   OTP path actually emits. After deploying, expect it to fire above 500 OTPs
-  sent through the configuration flow (`GET /config`) in 5 minutes, and review
+  sent through the configuration flow (`/config`) in 5 minutes, and review
   that threshold against your real volume. OTPs sent through the `/msisdn` web
   flow still emit no `OtpSent` and are not counted yet; see #51 (#42).
 

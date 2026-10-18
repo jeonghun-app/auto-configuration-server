@@ -14,9 +14,18 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   missing data as not breaching, stayed `OK` whatever the send volume — leaving
   SMS pumping (threat T5) to the rate limits and the account spending limit
   alone. It now names both dimensions, and a test compares it with the EMF the
-  OTP path actually emits. After deploying, expect it to fire above 500 OTPs in
-  5 minutes as documented; review that threshold against your real volume
-  (#42).
+  OTP path actually emits. After deploying, expect it to fire above 500 OTPs
+  sent through the configuration flow (`GET /config`) in 5 minutes, and review
+  that threshold against your real volume. OTPs sent through the `/msisdn` web
+  flow still emit no `OtpSent` and are not counted yet; see #51 (#42).
+
+### Upgrade notes
+
+- **Re-attach any SNS action to `<stack>-otp-volume` after deploying.** The
+  template sets no alarm actions, and the stack update that fixes the alarm
+  rewrites its whole definition, dropping an action attached by hand. Repeat
+  this after every deploy that changes an alarm until the stack wires the
+  actions itself (#48).
 
 ## [1.4.0] — 2026-10-04
 

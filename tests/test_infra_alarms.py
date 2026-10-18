@@ -34,7 +34,7 @@ TEMPLATE = pathlib.Path(__file__).resolve().parents[1] / "infra" / "app.yaml"
 
 EXISTING_ALARMS = ("UnhealthyTargetsAlarm", "ServerErrorAlarm", "OtpVolumeAlarm")
 NOTIFICATION_KEYS = ("AlarmActions", "OKActions", "InsufficientDataActions")
-SERVER_FAULT_METRICS = ("OtpDeliveryFailed", "DmEncodingError")
+ANY_OCCURRENCE_METRICS = ("OtpDeliveryFailed", "DmEncodingError")
 
 
 class _CfnLoader(yaml.SafeLoader):
@@ -221,13 +221,18 @@ def test_the_alarm_notifies_exactly_like_the_existing_alarms(
             assert alarm.get(key) == existing.get(key), f"{metric} {key} differs from {name}"
 
 
-@pytest.mark.parametrize("metric", SERVER_FAULT_METRICS)
-def test_a_single_server_fault_breaches_the_alarm(metric: str, resources: dict[str, Any]) -> None:
+@pytest.mark.parametrize("metric", ANY_OCCURRENCE_METRICS)
+def test_one_failure_breaches_the_alarm_and_it_clears_only_after_five_quiet_minutes(
+    metric: str, resources: dict[str, Any]
+) -> None:
     alarm = alarm_on(resources, metric)
     assert alarm["Statistic"] == "Sum"
     assert alarm["ComparisonOperator"] == "GreaterThanThreshold"
     assert alarm["Threshold"] == 0
     assert alarm.get("DatapointsToAlarm", alarm["EvaluationPeriods"]) == 1
+    # 1 of 5: a persistent fault at low traffic holds ALARM rather than
+    # flapping to OK between requests.
+    assert alarm["Period"] * alarm["EvaluationPeriods"] == 300
 
 
 def test_store_contention_alarms_on_a_sustained_rate_not_on_one_burst(

@@ -48,11 +48,11 @@ It is generated and gated, not written:
 
 | Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
 | --- | --- | --- | --- | --- | --- |
-| OMA Device Management 1.2 (server role) | 58 | 37 | 6 | 15 | 10 |
+| OMA Device Management 1.2 (server role) | 59 | 39 | 6 | 14 | 9 |
 | GSMA RCC.14 Service Provider Device Configuration (ACS role) | 55 | 43 | 10 | 2 | 7 |
-| **Total** | **113** | **80** | **16** | **17** | **17** |
+| **Total** | **114** | **82** | **16** | **16** | **16** |
 
-**Overall: not fully conformant.** 17 requirements this project classifies as mandatory are not fully implemented, and 3 further specification families could not be assessed at all because the documents are not held. Both are listed below, and `scripts/gen_conformance.py --strict` exits non-zero for each reason separately.
+**Overall: not fully conformant.** 16 requirements this project classifies as mandatory are not fully implemented, and 3 further specification families could not be assessed at all because the documents are not held. Both are listed below, and `scripts/gen_conformance.py --strict` exits non-zero for each reason separately.
 
 ## Specification families not assessed
 
@@ -78,7 +78,7 @@ These were asked for and **cannot be assessed here, because the document is not 
   * Whether it defines Korean management objects beyond the standardised set.
   * Which conformance test suite, if any, a device or server must pass.
 * Existing gaps an assessment would most likely touch: `OMADM-ENC-WBXML`, `OMADM-FLOW-NOTIFICATION`, `OMADM-TREE-ACL`, `OMADM-AUTH-SERVER-TO-CLIENT`, `OMADM-MO-DMACC`, `OMADM-SIZE-SPLITTING`
-* Note: The related_gaps list is where an assessment would most likely land, based on what national operator profiles usually require. That is expectation, not knowledge, and none of those gaps is currently closed.
+* Note: The related_gaps list is where an assessment would most likely land, based on what national operator profiles usually require. That is expectation, not knowledge. Of those requirements, only OMADM-SIZE-SPLITTING is implemented.
 
 ### `kr-mno-interworking` — Korean three-operator RCS interworking specification
 
@@ -131,14 +131,7 @@ These were asked for and **cannot be assessed here, because the document is not 
 * Status: **partial** (behaviour-tested)
 * Reference: OMA-TS-DM_RepPro, MsgID and MsgRef
 * Gap: The MsgID is required and echoed as MsgRef, but ordering, duplicates and replay are not checked, and the server mirrors the client MsgID rather than keeping its own outbound counter.
-* Impact: A replayed or out-of-order client message is processed as if it were new. Harmless in the strict request and response flow used today; it becomes wrong as soon as the server sends two messages for one client message.
-
-### `OMADM-SIZE-SPLITTING` — Split a package that exceeds the negotiated MaxMsgSize
-
-* Status: **not-implemented** (code-review-only)
-* Reference: OMA-TS-DM_Protocol, large message handling
-* Gap: The negotiated size is advertised but the server always emits its commands in a single package. DmSession.pending exists for this and is unused.
-* Impact: A client advertising a small MaxMsgSize may reject or truncate the configuration push. This is the most likely remaining real-device failure.
+* Impact: A replayed or out-of-order client message is processed as if it were new. The server still sends one message per client message, so the mirrored MsgID stays unique. A client that resends a message because the answer was lost is answered with the next part of a split package or the next phase, and the lost message is not repeated.
 
 ### `OMADM-FLOW-CORRELATION` — Match incoming Status and Results to the commands that were sent
 
@@ -254,9 +247,10 @@ These were asked for and **cannot be assessed here, because the document is not 
 | `OMADM-HDR-MSGID` | Require the MsgID and reference it from every Status | mandatory | partial | behaviour-tested | `test_status_carries_the_references` | The MsgID is required and echoed as MsgRef, but ordering, duplicates and replay are not checked, and the server mirrors the client MsgID rather than keeping its own outbound counter. |
 | `OMADM-HDR-ADDRESSING` | Set Target to the client source and Source to the DM server URI | mandatory | yes | behaviour-tested | `test_server_addresses_its_response_to_the_client_source` | — |
 | `OMADM-HDR-MAXMSGSIZE` | Never advertise a message size larger than the client accepts | mandatory | yes | behaviour-tested | `test_client_max_msg_size_is_honoured` | — |
-| `OMADM-SIZE-SPLITTING` | Split a package that exceeds the negotiated MaxMsgSize | mandatory | no | code-review-only | — | The negotiated size is advertised but the server always emits its commands in a single package. DmSession.pending exists for this and is unused. |
-| `OMADM-ALERT-1222` | Continue a split package on Alert 1222 | conditional | no | code-review-only | — | The constant is defined; no handler exists. |
-| `OMADM-FINAL` | Mark the last message of a package with Final | mandatory | yes | behaviour-tested | `test_non_final_package_omits_final`<br>`test_full_session_pushes_ims_and_volte_configuration` | — |
+| `OMADM-SIZE-SPLITTING` | Split a package that exceeds the negotiated MaxMsgSize | mandatory | yes | behaviour-tested | `test_no_message_of_a_whole_session_exceeds_the_client_max_msg_size`<br>`test_a_message_exactly_at_max_msg_size_is_sent_whole_and_one_byte_less_is_split`<br>`test_every_received_command_is_acknowledged_once_across_a_split_package`<br>`test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing`<br>`test_six_thousand_replace_commands_receive_the_same_package_in_xml_and_wbxml`<br>`test_the_cli_follows_a_split_package_within_its_max_msg_size` | Every message is measured in the encoding it is sent in, XML or WBXML, against the smaller of the client's MaxMsgSize and ACS_DM_MAX_MSG_SIZE. Statuses and Get, Add and Replace items are split individually, so a long Replace continues in the next message. If the smallest message the server must send cannot fit, it answers HTTP 400 with DmMessageTooLarge and stores nothing; see OMADM-SIZE-LARGE-OBJECT. |
+| `OMADM-ALERT-1222` | Continue a split package on Alert 1222 | conditional | yes | behaviour-tested | `test_a_continuation_does_not_advance_the_session_phase`<br>`test_statuses_and_results_sent_with_alert_1222_are_not_lost`<br>`test_ending_a_session_mid_package_discards_the_remainder`<br>`test_a_closing_package_that_does_not_fit_ends_the_session_with_its_last_message` | Any client message that arrives while a package is incomplete is answered with its next message, Alert 1222 or not, and its Results and Status are recorded. Each such answer must also move the package on by at least one entry, so a package cannot stall. |
+| `OMADM-SIZE-LARGE-OBJECT` | Send an item larger than one message as a large object | conditional | no | behaviour-tested | `test_a_message_that_cannot_fit_fails_cleanly_and_changes_nothing` | An item is never chunked with MoreData. When one item, with the header and the acknowledgements it must travel with, does not fit the negotiated MaxMsgSize, the request is refused with HTTP 400 and DmMessageTooLarge. |
+| `OMADM-FINAL` | Mark the last message of a package with Final | mandatory | yes | behaviour-tested | `test_non_final_package_omits_final`<br>`test_full_session_pushes_ims_and_volte_configuration`<br>`test_no_message_of_a_whole_session_exceeds_the_client_max_msg_size` | — |
 | `OMADM-FLOW-CLIENT-INIT` | Accept a client-initiated session opened with Alert 1201 | mandatory | yes | behaviour-tested | `test_valid_basic_credentials_are_accepted`<br>`test_first_package_without_an_alert_is_a_protocol_error` | — |
 | `OMADM-FLOW-SERVER-INIT-ALERT` | Accept a session opened with Alert 1200 | conditional | yes | behaviour-tested | `test_server_initiated_alert_is_also_accepted` | — |
 | `OMADM-FLOW-NOTIFICATION` | Originate a server-initiated session notification | optional | no | code-review-only | — | Waking a device requires a WAP Push or trigger SMS through an operator SMSC, the same dependency that blocks port-addressed OTP SMS. |
@@ -267,7 +261,7 @@ These were asked for and **cannot be assessed here, because the document is not 
 | `OMADM-CMD-GET` | Issue Get and consume the Results | mandatory | yes | behaviour-tested | `test_device_inventory_is_recorded_from_the_session`<br>`test_get_command_lists_every_uri` | — |
 | `OMADM-CMD-REPLACE` | Issue Replace with Format and Type meta for every leaf | mandatory | yes | behaviour-tested | `test_replace_carries_meta_and_data`<br>`test_full_session_pushes_ims_and_volte_configuration` | — |
 | `OMADM-CMD-ADD-INTERIOR` | Add the interior nodes a leaf needs before replacing that leaf | mandatory | yes | behaviour-tested | `test_interior_nodes_are_added_before_leaves`<br>`test_interior_nodes_are_ordered_parent_first`<br>`test_add_of_an_interior_node_carries_no_data` | — |
-| `OMADM-CMD-STATUS` | Return a Status for the header and for every command received | mandatory | yes | behaviour-tested | `test_every_received_command_gets_a_status` | — |
+| `OMADM-CMD-STATUS` | Return a Status for the header and for every command received | mandatory | yes | behaviour-tested | `test_every_received_command_gets_a_status`<br>`test_every_received_command_is_acknowledged_once_across_a_split_package` | — |
 | `OMADM-CMD-RESULTS` | Parse Results and record the values reported by the device | mandatory | yes | behaviour-tested | `test_device_inventory_is_recorded_from_the_session` | — |
 | `OMADM-CMD-EXEC` | Issue Exec against an executable node | optional | partial | behaviour-tested | `test_exec_and_alert_commands_are_emitted` | The command can be generated, but no management object declares an executable node and the session never issues one. |
 | `OMADM-CMD-DELETE` | Issue Delete, or refuse it honestly when received | optional | no | behaviour-tested | `test_unsupported_commands_are_refused_not_acknowledged` | The server never issues Delete, and a received Delete is answered 406 rather than executed. |
@@ -300,9 +294,9 @@ These were asked for and **cannot be assessed here, because the document is not 
 | `OMADM-MO-DMACC` | Expose the DM account as a manageable object | optional | no | code-review-only | — | The DM account is bootstrapped one way, through the OMA-CP w7 characteristic. There is no DMAcc management object, so the account cannot be inspected or rotated over DM. |
 | `OMADM-MO-EXTENSIBLE` | Add a management object without changing server code | optional | yes | behaviour-tested | `test_a_new_management_object_needs_no_code` | This is the extensibility requirement the project was asked for: a new managed service is a YAML file. |
 | `OMADM-ENC-XML` | Accept the XML SyncML encoding | mandatory | yes | behaviour-tested | `test_dm_endpoint_answers_over_http` | — |
-| `OMADM-ENC-WBXML` | Accept the WBXML SyncML encoding | mandatory | partial | behaviour-tested | `test_a_fixed_wbxml_vector_decodes_to_the_expected_syncml_message`<br>`test_both_wbxml_versions_and_syncml_public_identifiers_round_trip`<br>`test_malformed_or_unsupported_wbxml_is_rejected`<br>`test_indentation_is_omitted_from_the_fixed_wbxml_vector`<br>`test_removing_indentation_preserves_whitespace_in_leaf_values`<br>`test_wbxml_requests_preserve_state_through_a_complete_dm_session`<br>`test_wbxml_md5_credentials_are_checked_against_the_stored_nonce`<br>`test_six_thousand_replace_commands_receive_the_same_response_in_xml_and_wbxml`<br>`test_wbxml_encoding_failure_preserves_session_and_device_state`<br>`test_server_wbxml_response_matches_independent_header_status_and_metinf_bytes`<br>`test_server_commands_match_independent_compact_wbxml_tokens`<br>`test_the_wbxml_cli_drives_an_authenticated_session` | This is the text-valued SyncML / MetInf subset, not general WBXML. Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY, processing instructions and other code pages are refused with HTTP 400. |
+| `OMADM-ENC-WBXML` | Accept the WBXML SyncML encoding | mandatory | partial | behaviour-tested | `test_a_fixed_wbxml_vector_decodes_to_the_expected_syncml_message`<br>`test_both_wbxml_versions_and_syncml_public_identifiers_round_trip`<br>`test_malformed_or_unsupported_wbxml_is_rejected`<br>`test_indentation_is_omitted_from_the_fixed_wbxml_vector`<br>`test_removing_indentation_preserves_whitespace_in_leaf_values`<br>`test_wbxml_requests_preserve_state_through_a_complete_dm_session`<br>`test_wbxml_md5_credentials_are_checked_against_the_stored_nonce`<br>`test_six_thousand_replace_commands_receive_the_same_package_in_xml_and_wbxml`<br>`test_wbxml_encoding_failure_preserves_session_and_device_state`<br>`test_server_wbxml_response_matches_independent_header_status_and_metinf_bytes`<br>`test_server_commands_match_independent_compact_wbxml_tokens`<br>`test_the_wbxml_cli_drives_an_authenticated_session` | This is the text-valued SyncML / MetInf subset, not general WBXML. Non-text binary OPAQUE, attributes, literal tags, extensions, ENTITY, processing instructions and other code pages are refused with HTTP 400. |
 | `OMADM-SEC-XXE` | Parse device-supplied SyncML without resolving external entities | mandatory | yes | behaviour-tested | `test_external_entities_are_not_expanded` | — |
-| `OMADM-SEC-BODY-LIMIT` | Bound the size of an accepted DM payload | mandatory | yes | behaviour-tested | `test_oversized_payload_is_refused`<br>`test_dm_endpoint_refuses_a_huge_body`<br>`test_repeated_string_table_references_cannot_exhaust_memory`<br>`test_wbxml_nesting_is_bounded_in_both_directions`<br>`test_the_dm_route_stops_reading_as_soon_as_the_body_limit_is_exceeded` | — |
+| `OMADM-SEC-BODY-LIMIT` | Bound the size of an accepted DM payload | mandatory | yes | behaviour-tested | `test_oversized_payload_is_refused`<br>`test_a_remainder_too_large_to_store_is_refused_and_changes_nothing`<br>`test_dm_endpoint_refuses_a_huge_body`<br>`test_repeated_string_table_references_cannot_exhaust_memory`<br>`test_wbxml_nesting_is_bounded_in_both_directions`<br>`test_the_dm_route_stops_reading_as_soon_as_the_body_limit_is_exceeded` | — |
 | `OMADM-SEC-SESSION-STORE` | Keep session state where every server task can see it | mandatory | yes | behaviour-tested | `test_dm_session_round_trip`<br>`test_expired_dm_session_is_treated_as_absent` | A DM session spans several HTTP requests, so in-process state would break the moment the service runs more than one task. |
 
 ## GSMA RCC.14 Service Provider Device Configuration (ACS role)

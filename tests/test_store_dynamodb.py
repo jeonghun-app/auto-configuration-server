@@ -209,6 +209,29 @@ def test_dm_session_round_trip(ddb_store: DynamoDbStore) -> None:
     assert ddb_store.get_dm_session("42") is None
 
 
+def test_dm_session_keeps_the_unsent_part_of_a_package(ddb_store: DynamoDbStore) -> None:
+    # Empty strings are where a DynamoDB round trip most often goes wrong.
+    pending = [
+        ["Status", "Replace", "1", "7", "200", ""],
+        ["Replace", "./3GPP_IMS/1/Timer_T1", "2000", "int", ""],
+    ]
+    ddb_store.put_dm_session(
+        DmSession(
+            session_id="42",
+            device_id=IMEI,
+            phase="configure",
+            pending=pending,
+            reported_failures=2,
+            expires_at=int(time.time()) + 600,
+        )
+    )
+    loaded = ddb_store.get_dm_session("42")
+    assert loaded is not None
+    assert loaded.pending == pending
+    assert loaded.reported_failures == 2
+    assert isinstance(loaded.reported_failures, int)
+
+
 def test_expired_dm_session_is_treated_as_absent(ddb_store: DynamoDbStore) -> None:
     # DynamoDB TTL deletion is asynchronous, so the store must also check.
     ddb_store.put_dm_session(

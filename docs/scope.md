@@ -49,7 +49,7 @@ They are recorded in `src/acs/catalog/specscope/korea.yaml` with what is publicl
 knowable, what only the document can answer, and where to obtain it. They
 deliberately carry **no requirement rows**: a row would imply a requirement had
 been read. `scripts/gen_conformance.py --strict` fails for this as a separately
-named reason, so it is never summed with the 17 known mandatory gaps.
+named reason, so it is never summed with the 16 known mandatory gaps.
 
 `src/acs/specscope.py` refuses citation-shaped text — a TTA standard number, a
 clause number, an annex reference — while a family's document is not held, and
@@ -144,4 +144,4 @@ See [limitations.md](limitations.md) for the full treatment. Summary:
 | Correct operation verified | yes, locally | `scripts/verify_stack.py`: 32 checks against the container, with both the in-memory and DynamoDB backends |
 | Correct operation verified on AWS | yes | Deployed to us-east-1 (ECS Fargate + ALB + DynamoDB + Secrets Manager) and verified live: 29 checks, no raw identifier in CloudWatch Logs, EMF metrics extracted into the `RcsAcs` namespace |
 | Every parameter cross-checked against a licensed spec edition | no | 25 of 116 OMA-CP parameters; see [spec-coverage.md](spec-coverage.md). Stated openly rather than claimed |
-| Both specifications accommodated, requirement by requirement | partly, and counted | 113 requirements registered in [conformance.md](conformance.md): 80 implemented, 14 partial, 19 not implemented, of which 17 are classified mandatory. `scripts/gen_conformance.py --strict` exits non-zero because of them |
+| Both specifications accommodated, requirement by requirement | partly, and counted | 114 requirements registered in [conformance.md](conformance.md): 82 implemented, 16 partial, 16 not implemented; 16 of the gaps are classified mandatory. `scripts/gen_conformance.py --strict` exits non-zero because of them |

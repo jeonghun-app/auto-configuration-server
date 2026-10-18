@@ -121,7 +121,7 @@ async def test_wbxml_requests_preserve_state_through_a_complete_dm_session(
     assert device.imsi == TEST_IMSI
 
 
-async def test_six_thousand_replace_commands_receive_the_same_response_in_xml_and_wbxml(
+async def test_six_thousand_replace_commands_receive_the_same_package_in_xml_and_wbxml(
     settings: Settings, dm_store: MemoryStore
 ) -> None:
     body = "<Alert><CmdID>1</CmdID><Data>1201</Data></Alert>" + "".join(
@@ -134,37 +134,61 @@ async def test_six_thousand_replace_commands_receive_the_same_response_in_xml_an
     large_settings = settings.model_copy(update={"dm_max_msg_size": 128 * 1024})
     subscriber = dm_store.get_subscriber(TEST_IMSI)
     assert subscriber is not None
-    responses: list[bytes] = []
-    for payload, content_type in (
-        (xml, syncml.CONTENT_TYPE_XML),
-        (wire, syncml.CONTENT_TYPE_WBXML),
-    ):
+    packages: list[list[syncml.SyncMlMessage]] = []
+    for binary in (False, True):
+        content_type = syncml.CONTENT_TYPE_WBXML if binary else syncml.CONTENT_TYPE_XML
         store = MemoryStore()
         store.put_subscriber(deepcopy(subscriber))
         app = create_app(large_settings, store)
+        messages: list[syncml.SyncMlMessage] = []
         async with (
             app.router.lifespan_context(app),
             httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=app), base_url="http://testserver"
             ) as client,
         ):
-            response = await client.post(
-                "/dm", content=payload, headers={"Content-Type": content_type}
-            )
-        assert response.status_code == 200
-        assert response.headers["content-type"] == content_type
-        session = store.get_dm_session(SESSION_KEY)
-        assert session is not None and session.phase == "devinfo"
-        assert session.authenticated and session.last_msg_id == 1
+            payload = wire if binary else xml
+            while True:
+                response = await client.post(
+                    "/dm", content=payload, headers={"Content-Type": content_type}
+                )
+                assert response.status_code == 200
+                assert response.headers["content-type"] == content_type
+                # The client advertised 16384; one message used to be 231,588 bytes.
+                assert len(response.content) <= 16384
+                messages.append(
+                    syncml.parse(wbxml.decode(response.content) if binary else response.content)
+                )
+                session = store.get_dm_session(SESSION_KEY)
+                assert session is not None and session.phase == "devinfo"
+                assert session.authenticated
+                if messages[-1].final:
+                    break
+                alert = "<Alert><CmdID>1</CmdID><Data>1222</Data></Alert>"
+                next_xml = package(len(messages) + 1, alert, cred=basic_cred())
+                payload = wbxml.encode(next_xml) if binary else next_xml
         assert store.get_device(TEST_IMEI) is not None
-        responses.append(response.content)
+        packages.append(messages)
 
-    message = syncml.parse(responses[0])
-    statuses = message.of("Status")
-    assert len(statuses) == 6002
-    assert all(status.data == "200" for status in statuses[1:])
-    assert message.of("Get") and message.final
-    assert responses[1] == wbxml.encode(responses[0])
+    def package_content(messages: list[syncml.SyncMlMessage]) -> list[tuple[str, ...]]:
+        """The package's commands, without the per-message header acknowledgements."""
+        return [
+            (command.name, command.cmd, command.cmd_ref, command.data, *map(str, command.items))
+            for message in messages
+            for command in message.commands
+            if command.msg_ref == "1" or command.name == "Get"
+        ]
+
+    for messages in packages:
+        assert len(messages) > 1
+        assert [m.final for m in messages] == [False] * (len(messages) - 1) + [True]
+        statuses = [s for m in messages for s in m.of("Status") if s.msg_ref == "1"]
+        assert len(statuses) == 6002
+        assert all(status.data == "200" for status in statuses[1:])
+        assert messages[-1].of("Get")
+    assert package_content(packages[0]) == package_content(packages[1])
+    # WBXML is the compact encoding, so it needs fewer messages for the same package.
+    assert len(packages[1]) < len(packages[0])
 
 
 @pytest.mark.parametrize(

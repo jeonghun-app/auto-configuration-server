@@ -5,6 +5,24 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **OMA-DM responses respect the client's `MaxMsgSize`.** Until now a package was
+  always sent as one message, so a device advertising 16384 bytes could receive
+  231,588 bytes of XML and reject it. A package that does not fit is now sent as
+  several messages: all but the last omit `Final`, and the device asks for the
+  next with `Alert` 1222. Size is measured on the encoded bytes, in XML and in
+  WBXML. Statuses and individual `Get`, `Add` and `Replace` items are split, so a
+  long `Replace` continues in the next message; a package that fits is unchanged
+  on the wire. The session keeps its phase and the unsent part until the package
+  is complete, and `Results` or failure statuses sent with `Alert` 1222 are still
+  recorded. If even the smallest next message cannot fit, the answer is `400`
+  with `DmMessageTooLarge` and nothing is stored; items are not chunked as large
+  objects. A request owed more acknowledgements than the 256 KiB session budget
+  can hold gets `413` with `DmTooLarge`. `tools/dm_client_sim.py --max-msg-size`
+  exercises it, and `scripts/verify_stack.py` now runs a second DM session at
+  1500 bytes. See [docs/oma-dm.md](docs/oma-dm.md#message-size). (#20)
+
 ## [1.4.0] — 2026-10-04
 
 Two of the limitations recorded since 1.0.0 are lifted — WBXML-encoded DM

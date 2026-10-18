@@ -35,7 +35,7 @@ make verify                  # 두 평면의 종단간 검증
 
 ```
 18 checks passed, 0 failed     # RCS 자동 설정 (RCC.14 / OMA-CP)
-14 checks passed, 0 failed     # OMA-DM 단말 관리 (SyncML DM 1.2)
+30 checks passed, 0 failed     # OMA-DM 단말 관리 (SyncML DM 1.2)
 RESULT: PASS — both planes behave as specified
 ```
 
@@ -185,15 +185,15 @@ IMEI, MSISDN을 받고, 악용 시 실제 비용이 발생하는 OTP 엔드포�
 
 | 규격 | 요구사항 | 구현 | 부분 | 미구현 | 필수 미충족 |
 | --- | --- | --- | --- | --- | --- |
-| OMA-DM 1.2 (서버 역할) | 58 | 37 | 6 | 15 | 10 |
+| OMA-DM 1.2 (서버 역할) | 59 | 39 | 6 | 14 | 9 |
 | RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 10 | 2 | 7 |
-| **합계** | **113** | **80** | **16** | **17** | **17** |
+| **합계** | **114** | **82** | **16** | **16** | **16** |
 
 **정직한 답은 "상당 부분 수용했고, 빠진 것은 다음과 같다"입니다.**
-`scripts/gen_conformance.py --strict`는 이 17건이 남아 있는 동안 0이 아닌 값으로
-종료합니다. 큰 항목은 MaxMsgSize 메시지 분할, DM ACL, 서버→클라이언트 DM 인증,
-MSISDN 복구 플로우 완성, 그리고 텍스트 값 범위를 넘어서는 WBXML입니다(WBXML은
-1.4.0부터 지원하지만 `partial`이므로 여전히 미충족으로 셉니다).
+`scripts/gen_conformance.py --strict`는 이 16건이 남아 있는 동안 0이 아닌 값으로
+종료합니다. 큰 항목은 DM ACL, 서버→클라이언트 DM 인증, MSISDN 복구 플로우 완성,
+그리고 텍스트 값 범위를 넘어서는 WBXML입니다(WBXML은 1.4.0부터 지원하지만
+`partial`이므로 여전히 미충족으로 셉니다).
 
 "구현됨"이 "인증됨"으로 읽히지 않도록 네 축을 분리했습니다. 요구사항의 **수준**,
 그 수준을 라이선스 판본과 **교차 확인**했는지(전부 아니오 — 적합성 요구사항 표를
@@ -223,8 +223,9 @@ DM 평면은 `src/acs/catalog/omadm/`의 관리 객체 정의로 동작합니다
 
 세션은 XML과 WBXML(`application/vnd.syncml.dm+wbxml`) 모두 받으며, 요청이 온
 인코딩으로 응답합니다. WBXML 코덱은 텍스트 값으로 이루어진 SyncML·MetInf 범위를
-다룹니다. 바이너리 `OPAQUE`와 드물게 쓰이는 WBXML 구성은 `400`으로 거부하며,
-클라이언트의 `MaxMsgSize`에 맞춘 응답 분할은 아직 하지 않습니다.
+다룹니다. 바이너리 `OPAQUE`와 드물게 쓰이는 WBXML 구성은 `400`으로 거부합니다.
+클라이언트의 `MaxMsgSize`보다 큰 패키지는 여러 메시지로 나눠 보내며, 클라이언트는
+`Alert` 1222로 나머지를 받아 갑니다.
 
 자세한 내용: [docs/oma-dm.md](docs/oma-dm.md).
 

@@ -233,18 +233,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("  OMA-DM credentials obtained from the OMA-CP w7 characteristic")
             dm_checker = DmChecker()
-            dm_sim = DmClientSimulator(
-                base_url=base_url,
-                imsi=DEMO_IMSI,
-                imei=DEMO_IMEI,
-                password=dm_password,
-                auth="basic",
-                verify_tls=verify_tls,
-            )
-            try:
-                run_session(dm_sim, dm_checker)
-            finally:
-                dm_sim.close()
+            # The second session advertises a small MaxMsgSize, so the server has
+            # to split its packages and keep the remainder in the session store.
+            for max_msg_size in (16384, 1500):
+                print(f"\n  session with MaxMsgSize {max_msg_size}")
+                dm_sim = DmClientSimulator(
+                    base_url=base_url,
+                    imsi=DEMO_IMSI,
+                    imei=DEMO_IMEI,
+                    password=dm_password,
+                    auth="basic",
+                    verify_tls=verify_tls,
+                    max_msg_size=max_msg_size,
+                )
+                try:
+                    run_session(dm_sim, dm_checker)
+                finally:
+                    dm_sim.close()
             dm_ok = dm_checker.summary()
 
     report_coverage(base_url, args.admin_token, verify_tls)

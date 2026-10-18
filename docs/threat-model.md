@@ -114,6 +114,11 @@ off, `no_network` on, `load_dtd` off and `huge_tree` off. The DM body is capped,
 and outgoing documents are built with `lxml` rather than string templates, so
 attribute escaping is always correct.
 
+A small DM request can be owed a large answer, because every command gets a
+`Status`. What does not fit the client's `MaxMsgSize` is stored on the session
+until the client asks for it. That stored part is capped at 256 KiB, and a
+request over the cap gets `413` with nothing stored.
+
 ### T10 — Fleet-wide denial of service through configuration
 
 *The worst thing this service can do to its own users.*

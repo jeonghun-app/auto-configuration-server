@@ -63,6 +63,74 @@ across ECS tasks mid-flow. Sessions carry a TTL and DynamoDB expires them.
 `Alert 1226` from the client ends the session at any point. A first package
 without `Alert` 1200 or 1201 is a protocol error (`400`).
 
+Each server package above fits in one message for a client that accepts 16 KB.
+A client with a smaller `MaxMsgSize` receives a package in several messages; see
+[Message size](#message-size).
+
+## Message size
+
+The `MaxMsgSize` in a client's `SyncHdr` is the largest message that client can
+receive. The server never sends a message larger than that, or larger than
+`ACS_DM_MAX_MSG_SIZE` (16384 by default) when the client states no limit or a
+higher one. The size is measured on the bytes sent, in XML or in WBXML, after
+encoding. WBXML is about a quarter of the size of the same message in XML, so a
+WBXML client needs fewer messages.
+
+When a package does not fit, it is sent as several messages
+(OMA-TS-DM_Protocol, multiple messages in a package):
+
+```
+device                                            ACS
+  │  POST /dm  Alert 1201 + Replace ./DevInfo/*     │
+  ├────────────────────────────────────────────────►│
+  │◄────────────────────────────────────────────────┤  Status … + Get (first part)
+  │                                                 │  no Final
+  │  POST /dm  Status SyncHdr + Alert 1222          │
+  ├────────────────────────────────────────────────►│
+  │◄────────────────────────────────────────────────┤  Status for the 1222
+  │                                                 │  + Get (rest) + Final
+```
+
+- Every message but the last of a package omits `Final`. The client asks for the
+  next one with `Alert` 1222.
+- Statuses and the individual items of `Get`, `Add` and `Replace` are the units
+  of splitting. A long `Replace` continues as a second `Replace` in the next
+  message. When a package fits in one message, it is the same on the wire as
+  before splitting existed: one `Add` and one `Replace` carrying every item.
+- `CmdID` restarts at 1 in every message. A `Status` keeps the `MsgRef` of the
+  message that carried the command it answers, which may be an earlier one.
+- The session stays in its phase until the package is complete. The unsent part
+  is stored on the session (`DmSession.pending`), so the next message can be
+  served by any task.
+- Any client message that arrives while a package is incomplete is answered with
+  the next message of that package, whether or not it carries `Alert` 1222.
+  `Results` and `Status` sent with it are recorded: inventory values are saved,
+  and command failures count towards `DmSessionCompleteWithErrors` at the end.
+- Each of those answers acknowledges the client's message and carries at least
+  one more entry of the package, so a package always finishes.
+- `Alert` 1223 or 1226 discards the unsent part. Their answer, and every
+  authentication challenge, must fit in one message.
+
+### When a message cannot fit
+
+The server does not send a message over the limit, and it does not chunk a
+single item as a large object (`MoreData`). If the smallest message it must send
+next does not fit, which is the header with the acknowledgements and the next
+item, the answer is HTTP `400` with the `DmMessageTooLarge` metric and an empty
+body. Nothing is stored, so the client can retry with a larger `MaxMsgSize`.
+
+It is a `4xx` because the limit comes from the request. A `5xx` would let any
+client trigger the `<stack>-5xx` alarm by advertising a tiny `MaxMsgSize`.
+Catalogue values are a few hundred bytes at most. With the shipped catalogue, a
+whole session completes with a `MaxMsgSize` of about 1.3 KB in XML and about
+370 bytes in WBXML.
+
+The unsent part of a package is limited to 256 KiB, measured as compact JSON, so
+that a session always fits in a DynamoDB item (400 KB). Only a request with
+several thousand commands, each owed a `Status`, reaches it. It is refused with
+HTTP `413`, the `DmTooLarge` metric and the detail `package_too_large`, and
+nothing is stored.
+
 ## Authentication
 
 `ACS_DM_AUTH_SCHEME` selects `basic`, `md5` or `none` (local testing only).
@@ -128,8 +196,9 @@ elements, 32 MiB of source XML and 16 MiB of WBXML. These allow a compact reques
 with many commands to expand into acknowledgements and catalogue commands.
 Session and device changes are saved only after the response is encoded. An
 encoding failure returns HTTP `500` with the `DmEncodingError` metric and leaves
-the stored state unchanged, allowing the client to retry. These resource limits
-do not implement response splitting to satisfy a client's `MaxMsgSize`.
+the stored state unchanged, allowing the client to retry. These are resource
+limits on the encoder. Keeping each message within the client's `MaxMsgSize` is
+a separate mechanism; see [Message size](#message-size).
 
 Basic and nonce-based MD5 credentials are checked after decoding, exactly as for
 XML. The current DM authentication implementation does not calculate a MAC or
@@ -242,15 +311,20 @@ python tools/dm_client_sim.py \
   --password "<AAUTHSECRET from the w7 characteristic>"
 ```
 
-14 checks, covering authentication, `Status` codes, the inventory `Get`, the
-configuration `Replace`, the VoLTE nodes, and clean session termination.
-`scripts/verify_stack.py` does the whole chain including harvesting the password.
+15 checks, covering authentication, `Status` codes, the inventory `Get`, the
+configuration `Replace`, the VoLTE nodes, clean session termination, and that no
+server message exceeded the advertised `MaxMsgSize`. `--max-msg-size 1500` makes
+the server split its packages, and the simulator follows them with `Alert` 1222.
+`scripts/verify_stack.py` does the whole chain including harvesting the password,
+and runs the DM session twice: with `MaxMsgSize` 16384 and with 1500.
 
 Add `--wbxml` to the simulator command to run the same session using WBXML.
 `--auth md5 --wbxml` also exercises the nonce challenge. Fixed byte vectors,
 malformed payloads and resource limits are tested in `tests/test_dm_wbxml.py`;
 HTTP sessions and authentication in `tests/test_dm_wbxml_session.py`; the CLI
 in `tests/test_dm_wbxml_simulator.py` and the live-server simulator suite.
+Message splitting, its boundary and its failure paths are tested in both
+encodings in `tests/test_dm_message_size.py`.
 
 ## What is missing
 
@@ -259,4 +333,11 @@ in `tests/test_dm_wbxml_simulator.py` and the live-server simulator suite.
 - **Server-initiated sessions** — needs a WAP Push or trigger SMS through an
   operator SMSC.
 - **Large object handling** — `./DevDetail/LrgObj` is read but chunked transfer is
-  not implemented.
+  not implemented. An item that cannot fit in one message is refused as described
+  in [When a message cannot fit](#when-a-message-cannot-fit).
+- **Client packages split across messages** — a client message without `Final`
+  is processed as a complete package. The server does not answer it with
+  `Alert` 1222 to collect the rest (#49).
+- **Retried messages** — a client that resends a message because the answer was
+  lost receives the next message of the package, not the lost one. MsgID replay
+  is not detected (`OMADM-HDR-MSGID` in [conformance.md](conformance.md), #50).

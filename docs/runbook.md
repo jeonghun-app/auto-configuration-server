@@ -215,6 +215,32 @@ one: read the `dm response encoding failure` log entry and open an issue.
 `DmProtocolError` is the device-side counterpart — a request that could not be
 parsed or decoded, answered with `400`.
 
+## DM message does not fit MaxMsgSize
+
+`DmMessageTooLarge` (HTTP `400`) means the server could not build even its
+smallest next message within the `MaxMsgSize` the device advertised. Nothing was
+stored. Find the advertised limit and the size needed:
+
+```bash
+aws logs filter-log-events --region $REGION \
+  --log-group-name /aws/ecs/rcs-acs-app \
+  --filter-pattern '"dm message does not fit the client MaxMsgSize"' --max-items 20
+```
+
+Each entry carries `limit` and `size`. A whole session needs about 1.3 KB in XML
+or 370 bytes in WBXML with the shipped catalogue. A device below that cannot be
+managed until it advertises more, because large objects are not implemented. If
+`size` is large and the device's limit is normal, look for a subscriber override
+with a very long value.
+
+`DmTooLarge` with detail `package_too_large` (HTTP `413`) is a request with
+several thousand commands, whose remaining acknowledgements would exceed the
+256 KiB session budget (`dm package remainder exceeds the session budget`). No
+real DM client sends that; treat repeats from one source as probing.
+
+`DmPackageContinued` is normal: a split package continuing on the device's
+`Alert` 1222. See [oma-dm.md](oma-dm.md#message-size).
+
 ## 5xx alarm fired
 
 ```bash

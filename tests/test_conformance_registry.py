@@ -39,7 +39,6 @@ KNOWN_MANDATORY_GAPS: frozenset[str] = frozenset(
         # OMA-DM
         "OMADM-HDR-VERPROTO-VALIDATE",
         "OMADM-HDR-MSGID",
-        "OMADM-SIZE-SPLITTING",
         "OMADM-FLOW-CORRELATION",
         "OMADM-STATUS-5XX",
         "OMADM-AUTH-NONCE-ROTATION",
@@ -378,7 +377,7 @@ def test_missing_meta_is_refused(tmp_path: pathlib.Path) -> None:
 def test_symbol_resolution_finds_functions_and_methods() -> None:
     assert conformance.symbol_exists("src/acs/conformance.py::load_all", REPO_ROOT)
     assert conformance.symbol_exists(
-        "src/acs/protocol/omadm/session.py::DmService._ack_only", REPO_ROOT
+        "src/acs/protocol/omadm/session.py::DmService._acks", REPO_ROOT
     )
     assert conformance.symbol_exists("src/acs/catalog/omadm/01-devinfo.yaml", REPO_ROOT)
 

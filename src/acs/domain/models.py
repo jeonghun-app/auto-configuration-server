@@ -176,7 +176,11 @@ class DmSession:
     server_cmd_id: int = 0
     authenticated: bool = False
     nonce: str = ""
-    pending: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    pending: list[list[str]] = dataclasses.field(default_factory=list)
+    """The part of the current server package not yet sent, in the stored form of
+    :func:`acs.protocol.omadm.package.to_stored`."""
+    reported_failures: int = 0
+    """Command failures the client has reported so far, across every message."""
     expires_at: int = 0
 
     def to_item(self) -> dict[str, Any]:
@@ -186,7 +190,7 @@ class DmSession:
     def from_item(cls, item: dict[str, Any]) -> DmSession:
         fields = {f.name for f in dataclasses.fields(cls)}
         kwargs = {k: v for k, v in item.items() if k in fields}
-        for key in ("last_msg_id", "server_cmd_id", "expires_at"):
+        for key in ("last_msg_id", "server_cmd_id", "reported_failures", "expires_at"):
             if key in kwargs and kwargs[key] is not None:
                 kwargs[key] = int(kwargs[key])
         return cls(**kwargs)

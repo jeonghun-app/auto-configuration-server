@@ -36,7 +36,7 @@ Expected result:
 
 ```
 18 checks passed, 0 failed     # RCS auto-configuration (RCC.14 / OMA-CP)
-14 checks passed, 0 failed     # OMA-DM device management (SyncML DM 1.2)
+30 checks passed, 0 failed     # OMA-DM device management (SyncML DM 1.2)
 RESULT: PASS — both planes behave as specified
 ```
 
@@ -192,16 +192,15 @@ specification requirement:
 
 | Specification | Requirements | Implemented | Partial | Not implemented | Mandatory gaps |
 | --- | --- | --- | --- | --- | --- |
-| OMA-DM 1.2 (server role) | 58 | 37 | 6 | 15 | 10 |
+| OMA-DM 1.2 (server role) | 59 | 39 | 6 | 14 | 9 |
 | RCC.14 ACS + OMA-CP 1.1 | 55 | 43 | 10 | 2 | 7 |
-| **Total** | **113** | **80** | **16** | **17** | **17** |
+| **Total** | **114** | **82** | **16** | **16** | **16** |
 
 **The honest answer is "substantially, and here is exactly what is missing".**
 `scripts/gen_conformance.py --strict` exits non-zero, and will keep doing so while
-those 17 mandatory gaps remain. The largest are MaxMsgSize message splitting, DM
-ACLs, server-to-client DM authentication, completing the MSISDN recovery flow, and
-WBXML beyond the text-valued subset (supported since 1.4.0, so `partial`, but still
-a gap).
+those 16 mandatory gaps remain. The largest are DM ACLs, server-to-client DM
+authentication, completing the MSISDN recovery flow, and WBXML beyond the
+text-valued subset (supported since 1.4.0, so `partial`, but still a gap).
 
 Four axes are kept deliberately separate so that "implemented" cannot be read as
 "certified": the requirement's **level**, whether that level was **verified**
@@ -249,8 +248,8 @@ file — no server code changes. `GET /dm/mo` lists what is loaded.
 Sessions are accepted in XML and in WBXML (`application/vnd.syncml.dm+wbxml`) and
 answered in the encoding they arrived in. The WBXML codec covers the text-valued
 SyncML and MetInf subset; binary `OPAQUE` and the rarer WBXML constructs are
-refused with `400`, and responses are not yet split to fit the client's
-`MaxMsgSize`.
+refused with `400`. A package larger than the client's `MaxMsgSize` is sent as
+several messages, which the client collects with `Alert` 1222.
 
 See [docs/oma-dm.md](docs/oma-dm.md).
 

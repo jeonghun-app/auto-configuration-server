@@ -302,6 +302,7 @@ class SmppSmsSender:
         dest_addr_npi: int = 1,
         use_tls: bool = True,
         tls_ca_file: str = "",
+        tls_ca_pem: str = "",
         timeout: float = 10.0,
         store: Store | None = None,
     ) -> None:
@@ -334,6 +335,7 @@ class SmppSmsSender:
         self._dest_npi = dest_addr_npi
         self._use_tls = use_tls
         self._tls_ca_file = tls_ca_file
+        self._tls_ca_pem = tls_ca_pem
         self._timeout = timeout
         self._store = store
         self._reference_key = secrets.token_bytes(32)
@@ -469,7 +471,10 @@ class SmppSmsSender:
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
         if not self._use_tls:
             return sock
-        context = ssl.create_default_context(cafile=self._tls_ca_file or None)
+        # Either source replaces the system trust store; settings refuse both at once.
+        context = ssl.create_default_context(
+            cafile=self._tls_ca_file or None, cadata=self._tls_ca_pem or None
+        )
         try:
             return context.wrap_socket(sock, server_hostname=self._host)
         except BaseException:

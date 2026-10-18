@@ -143,18 +143,20 @@ number. With `smpp`, in order:
 1. **Every send fails right after a deploy** — the password secret still holds the
    stack's random placeholder. Set it as under
    [Setting or rotating the SMPP password](#setting-or-rotating-the-smpp-password).
-2. **Connection refused or timeout** — the SMSC address is outside `SmppSmscCidr`,
-   the port is wrong, or the operator has not allowed the task's public address.
-   The tasks may open `SmppPort` to that range and nothing else. Task public IPs
-   change with every replacement, and the stack has no fixed-egress option yet
-   (#31), so an SMSC that allow-lists source addresses cannot be satisfied
-   reliably.
+2. **Connection refused or timeout** — the SMSC address is outside every
+   `SmppSmscCidr` range, the port is wrong, or the operator has not allowed the
+   tasks' source address. The tasks may open `SmppPort` to those ranges and
+   nothing else. Without `FixedEgress` the source is each task's public IP, which
+   changes with every replacement, so an SMSC that allow-lists source addresses
+   needs `--fixed-egress single` or `per-az`; compare the `EgressIps` stack output
+   with the operator's list. With `single`, check that AZ A is healthy: every task
+   leaves through its NAT gateway.
 3. **TLS failure** — the SMSC does not offer TLS on that port, or its certificate
-   is from an operator private CA. `ACS_SMPP_TLS_CA_FILE` names a CA bundle, but
-   it is not a stack parameter and the root filesystem is read-only, so the
-   bundle has to be built into the image until #31 delivers it. Turn TLS off
-   (`--smpp-tls false`) only on a private link, since SMPP sends the password in
-   clear.
+   is from an operator private CA that is not in the bundle. Pass the bundle as
+   `--smpp-tls-ca-secret-arn`; see
+   [Setting or rotating the SMSC CA bundle](#setting-or-rotating-the-smsc-ca-bundle).
+   Turn TLS off (`--smpp-tls false`) only on a private link, since SMPP sends the
+   password in clear.
 4. **A `command_status` name such as `ESME_RINVPASWD` or `ESME_RBINDFAIL`** — the
    SMSC answered; take the name to the operator. A code outside the SMPP 3.4 table
    is reported only as vendor-specific or unlisted, never by its number, because
@@ -244,9 +246,11 @@ scripts/deploy.sh --allowed-cidr <cidr> --certificate-arn <arn> \
   --image-tag <previous-git-sha> --skip-build
 ```
 
-Repeat every parameter the stack was deployed with, including `--sms-provider`
-and the `--smpp-*` flags; anything left out reverts to the script's default (see
-[releasing.md](releasing.md#an-aws-deployment)). Tags are immutable, so the
+Repeat every parameter the stack was deployed with, including `--sms-provider`,
+`--fixed-egress` and the `--smpp-*` flags; anything left out reverts to the
+script's default (see [releasing.md](releasing.md#an-aws-deployment)). Leaving out
+`--fixed-egress` is the costly one: it releases the Elastic IPs the SMSC
+allow-lists, and they cannot be had back. Tags are immutable, so the
 previous image is still in ECR. The service deploys with
 `MinimumHealthyPercent: 100` and the circuit breaker enabled, so a bad rollout
 rolls itself back.
@@ -275,6 +279,33 @@ aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
 ```
 
 Secrets are read at task start, so a new deployment is required.
+
+## Setting or rotating the SMSC CA bundle
+
+When the SMSC certificate is from an operator private CA, the bundle lives in a
+Secrets Manager secret you own, as plain PEM text, named on the stack by
+`SmppTlsCaSecretArn`. To rotate it — the operator is about to re-issue the SMSC
+certificate under a new CA — put both CAs in the bundle first, so tasks trust the
+SMSC before and after the switch, and drop the old one once the operator confirms:
+
+```bash
+cat old-ca.pem new-ca.pem > bundle.pem
+aws secretsmanager put-secret-value --region $REGION --secret-id "$CA_SECRET_ARN" \
+  --secret-string file://bundle.pem \
+  && aws ecs update-service --region $REGION --cluster rcs-acs-app-cluster \
+       --service rcs-acs-app-service --force-new-deployment
+```
+
+The value is read at task start, so nothing changes until the deployment
+replaces the tasks. A bundle that cannot be loaded, or that contains a private
+key, stops the new tasks at startup with a configuration error naming
+`smpp_tls_ca_pem`, never its content; the circuit breaker then keeps the running
+tasks. The usual causes are a secret created as key/value JSON in the console and
+newlines escaped as `\n`: create it from a file with `--secret-string file://`.
+
+Pointing the stack at a different secret is a stack update
+(`--smpp-tls-ca-secret-arn`), because the execution role may read only the ARN on
+the stack. Use the complete ARN, with its random suffix.
 
 ## Restoring data
 

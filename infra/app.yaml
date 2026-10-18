@@ -13,7 +13,7 @@ Metadata:
       - Label: { default: Container image }
         Parameters: [ImageUri]
       - Label: { default: Network and TLS }
-        Parameters: [AllowedCidr, CertificateArn, VpcCidr]
+        Parameters: [AllowedCidr, CertificateArn, VpcCidr, FixedEgress]
       - Label: { default: Service sizing }
         Parameters: [Environment, DesiredCount, MaxCount, TaskCpu, TaskMemory]
       - Label: { default: ACS behaviour }
@@ -25,7 +25,20 @@ Metadata:
           - TrustedProxyCidrs
           - DmEnabled
       - Label: { default: Operator SMSC (SmsProvider=smpp) }
-        Parameters: [SmppHost, SmppPort, SmppSystemId, SmppTls, SmppSmscCidr]
+        Parameters:
+          - SmppHost
+          - SmppPort
+          - SmppSystemId
+          - SmppSystemType
+          - SmppTls
+          - SmppTlsCaSecretArn
+          - SmppSmscCidr
+          - SmppSourceAddr
+          - SmppSourceAddrTon
+          - SmppSourceAddrNpi
+          - SmppDestAddrTon
+          - SmppDestAddrNpi
+          - SmppTimeoutSeconds
       - Label: { default: Observability and privacy }
         Parameters: [LogRetentionDays, PiiLogMode, AlbAccessLogBucket]
 
@@ -56,6 +69,19 @@ Parameters:
     Type: String
     Default: 10.20.0.0/16
     AllowedPattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$'
+
+  FixedEgress:
+    Type: String
+    Default: none
+    AllowedValues: [none, single, per-az]
+    Description: >
+      none = tasks reach the internet from their own public IPs, which change with
+      every task replacement. single = one NAT gateway with an Elastic IP; the
+      tasks move behind it and lose their public IPs, so an SMSC can allow-list
+      one address (EgressIps output), but all egress stops if that one AZ fails.
+      per-az = a NAT gateway and Elastic IP in each AZ: two addresses to
+      allow-list, no single-AZ dependency, twice the NAT cost. See
+      docs/aws-deployment.md for the cost.
 
   Environment:
     Type: String
@@ -136,13 +162,80 @@ Parameters:
       SMPP sends the password in clear. Set false only when the SMSC is reached
       over a private link.
 
+  SmppSystemType:
+    Type: String
+    Default: ''
+    MaxLength: 12
+    AllowedPattern: '^[ -~]*$'
+    Description: SMPP system_type, if the operator issued one. Usually empty.
+
+  SmppTlsCaSecretArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+-[A-Za-z0-9]{6}$'
+    Description: >
+      Complete ARN (with its random suffix) of a Secrets Manager secret you
+      create, holding the operator's private CA bundle as plain PEM text. Empty
+      (the default) trusts the public CAs in the image. Only the task execution
+      role can read it, and only this one secret. Requires SmsProvider=smpp and
+      SmppTls=true.
+
+  # A String rather than a CommaDelimitedList: a template cannot count a list
+  # without a transform, so with a list a fifth range would be silently dropped.
+  # The pattern refuses it instead, and a single range, as 1.4.0 took, still fits.
   SmppSmscCidr:
     Type: String
     Default: ''
-    AllowedPattern: '^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$'
+    AllowedPattern: '^$|^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])(,([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])){0,3}$'
     Description: >
-      Address range of the SMSC. The tasks may only open SmppPort to this range.
+      Address ranges of the SMSC, comma-separated without spaces, at most four
+      (an SMSC pair needs two). The tasks may only open SmppPort to these ranges.
       Required when SmsProvider=smpp.
+
+  SmppSourceAddr:
+    Type: String
+    Default: ''
+    MaxLength: 20
+    AllowedPattern: '^[ -~]*$'
+    Description: >
+      SMPP source_addr. Empty sends the sender id "RCS". SmppSourceAddrTon and
+      SmppSourceAddrNpi must describe whichever is used.
+
+  SmppSourceAddrTon:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    MaxValue: 255
+    Description: 5 = alphanumeric (the default sender id), 1 = international.
+
+  SmppSourceAddrNpi:
+    Type: Number
+    Default: 0
+    MinValue: 0
+    MaxValue: 255
+    Description: 0 = unknown, 1 = ISDN (E.164).
+
+  SmppDestAddrTon:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 255
+    Description: 1 = international; the destination is the E.164 MSISDN without "+".
+
+  SmppDestAddrNpi:
+    Type: Number
+    Default: 1
+    MinValue: 0
+    MaxValue: 255
+    Description: 1 = ISDN (E.164).
+
+  SmppTimeoutSeconds:
+    Type: Number
+    Default: 10
+    MinValue: 1
+    MaxValue: 60
+    Description: >
+      Per SMSC response. The handset's HTTP request waits on it, so it is capped.
 
   TrustedProxyCidrs:
     Type: String
@@ -190,9 +283,30 @@ Rules:
         AssertDescription: SmsProvider=smpp requires SmppSystemId.
       - Assert: !Not [!Equals [!Ref SmppSmscCidr, '']]
         AssertDescription: SmsProvider=smpp requires SmppSmscCidr.
+  SmppCaNeedsSmppOverTls:
+    RuleCondition: !Not [!Equals [!Ref SmppTlsCaSecretArn, '']]
+    Assertions:
+      - Assert: !Equals [!Ref SmsProvider, smpp]
+        AssertDescription: SmppTlsCaSecretArn is used only with SmsProvider=smpp.
+      - Assert: !Equals [!Ref SmppTls, 'true']
+        AssertDescription: SmppTlsCaSecretArn needs SmppTls=true; without TLS it would be ignored.
 
 Conditions:
   UseSmpp: !Equals [!Ref SmsProvider, smpp]
+  HasSmppTlsCa: !Not [!Equals [!Ref SmppTlsCaSecretArn, '']]
+  # SmppSmscCidr padded so the second to fourth entries can be selected, as empty
+  # strings, even when fewer ranges are given.
+  HasSmscCidr2: !And
+    - !Condition UseSmpp
+    - !Not [!Equals [!Select [1, !Split [',', !Join ['', [!Ref SmppSmscCidr, ',,,']]]], '']]
+  HasSmscCidr3: !And
+    - !Condition UseSmpp
+    - !Not [!Equals [!Select [2, !Split [',', !Join ['', [!Ref SmppSmscCidr, ',,,']]]], '']]
+  HasSmscCidr4: !And
+    - !Condition UseSmpp
+    - !Not [!Equals [!Select [3, !Split [',', !Join ['', [!Ref SmppSmscCidr, ',,,']]]], '']]
+  UseFixedEgress: !Not [!Equals [!Ref FixedEgress, none]]
+  NatPerAz: !Equals [!Ref FixedEgress, per-az]
   HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
   WantAlbAccessLogs: !Not [!Equals [!Ref AlbAccessLogBucket, '']]
 
@@ -275,13 +389,106 @@ Resources:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties: { RouteTableId: !Ref RouteTable, SubnetId: !Ref PublicSubnetB }
 
+  # With fixed egress the app subnets are moved, in place, onto route tables whose
+  # default route is a NAT gateway, so they become private subnets. The table ID is
+  # joined with the NAT route and split off again only to make the move wait for
+  # that route: a bare Ref would move the subnet while the NAT gateway is still
+  # being created, leaving the running tasks with no way out for minutes.
   RouteAssociationAppA:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: { RouteTableId: !Ref RouteTable, SubnetId: !Ref AppSubnetA }
+    Properties:
+      SubnetId: !Ref AppSubnetA
+      RouteTableId: !If
+        - UseFixedEgress
+        - !Select [0, !Split ['|', !Join ['|', [!Ref PrivateRouteTableA, !Ref PrivateDefaultRouteA]]]]
+        - !Ref RouteTable
 
   RouteAssociationAppB:
     Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties: { RouteTableId: !Ref RouteTable, SubnetId: !Ref AppSubnetB }
+    Properties:
+      SubnetId: !Ref AppSubnetB
+      RouteTableId: !If
+        - UseFixedEgress
+        - !Select [0, !Split ['|', !Join ['|', [!Ref PrivateRouteTableB, !Ref PrivateDefaultRouteB]]]]
+        - !Ref RouteTable
+
+  # ---------------------------------------------------- fixed egress (optional)
+  # The Elastic IPs are the addresses the operator's SMSC allow-lists. They are
+  # released when FixedEgress goes back to none, or the stack is deleted, and an
+  # address once released cannot be had back.
+  EgressIpA:
+    Type: AWS::EC2::EIP
+    Condition: UseFixedEgress
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-egress-a' }]
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Condition: UseFixedEgress
+    Properties:
+      AllocationId: !GetAtt EgressIpA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-nat-a' }]
+
+  EgressIpB:
+    Type: AWS::EC2::EIP
+    Condition: NatPerAz
+    DependsOn: GatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-egress-b' }]
+
+  NatGatewayB:
+    Type: AWS::EC2::NatGateway
+    Condition: NatPerAz
+    Properties:
+      AllocationId: !GetAtt EgressIpB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-nat-b' }]
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Condition: UseFixedEgress
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-rt-a' }]
+
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Condition: UseFixedEgress
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGatewayA
+
+  # With FixedEgress=single, AZ B also leaves through the NAT gateway in AZ A.
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Condition: UseFixedEgress
+    Properties:
+      VpcId: !Ref Vpc
+      Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-private-rt-b' }]
+
+  PrivateDefaultRouteB:
+    Type: AWS::EC2::Route
+    Condition: UseFixedEgress
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [NatPerAz, !Ref NatGatewayB, !Ref NatGatewayA]
+
+  # Free, like the DynamoDB endpoint: ECR serves image layers from S3, and without
+  # this every image pull would be billed per GB by the NAT gateway.
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: UseFixedEgress
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds: [!Ref PrivateRouteTableA, !Ref PrivateRouteTableB]
 
   # Gateway endpoint: DynamoDB traffic never leaves the AWS network and costs
   # nothing, unlike an interface endpoint.
@@ -291,7 +498,10 @@ Resources:
       VpcId: !Ref Vpc
       ServiceName: !Sub 'com.amazonaws.${AWS::Region}.dynamodb'
       VpcEndpointType: Gateway
-      RouteTableIds: [!Ref RouteTable]
+      RouteTableIds: !If
+        - UseFixedEgress
+        - [!Ref RouteTable, !Ref PrivateRouteTableA, !Ref PrivateRouteTableB]
+        - [!Ref RouteTable]
 
   # ------------------------------------------------------- security groups
   AlbSecurityGroup:
@@ -331,6 +541,8 @@ Resources:
           Description: AWS service APIs (DynamoDB, Secrets Manager, ECR, logs, SMS)
       Tags: [{ Key: Name, Value: !Sub '${AWS::StackName}-task-sg' }]
 
+  # One rule per SmppSmscCidr entry, up to the four its pattern admits. The first
+  # keeps its 1.4.0 logical ID so an existing stack updates it in place.
   TaskEgressToSmsc:
     Type: AWS::EC2::SecurityGroupEgress
     Condition: UseSmpp
@@ -339,14 +551,47 @@ Resources:
     Metadata:
       cfn-lint:
         config:
-          ignore_checks: [W1030]
+          ignore_checks: [W1035]
     Properties:
       GroupId: !Ref TaskSecurityGroup
       IpProtocol: tcp
       FromPort: !Ref SmppPort
       ToPort: !Ref SmppPort
-      CidrIp: !Ref SmppSmscCidr
+      CidrIp: !Select [0, !Split [',', !Ref SmppSmscCidr]]
       Description: SMPP to the operator SMSC
+
+  TaskEgressToSmsc2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HasSmscCidr2
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref SmppPort
+      ToPort: !Ref SmppPort
+      CidrIp: !Select [1, !Split [',', !Ref SmppSmscCidr]]
+      Description: SMPP to the operator SMSC (second range)
+
+  TaskEgressToSmsc3:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HasSmscCidr3
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref SmppPort
+      ToPort: !Ref SmppPort
+      CidrIp: !Select [2, !Split [',', !Ref SmppSmscCidr]]
+      Description: SMPP to the operator SMSC (third range)
+
+  TaskEgressToSmsc4:
+    Type: AWS::EC2::SecurityGroupEgress
+    Condition: HasSmscCidr4
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref SmppPort
+      ToPort: !Ref SmppPort
+      CidrIp: !Select [3, !Split [',', !Ref SmppSmscCidr]]
+      Description: SMPP to the operator SMSC (fourth range)
 
   TaskIngressFromAlb:
     Type: AWS::EC2::SecurityGroupIngress
@@ -448,6 +693,10 @@ Resources:
                   - !Ref AdminTokenSecret
                   - !Ref PiiHashSecret
                   - !If [UseSmpp, !Ref SmppPasswordSecret, !Ref AWS::NoValue]
+                  # Created by the operator, not this stack, so the grant names the
+                  # one ARN given and nothing else. A customer-managed KMS key on
+                  # that secret also needs kms:Decrypt for this role in its key policy.
+                  - !If [HasSmppTlsCa, !Ref SmppTlsCaSecretArn, !Ref AWS::NoValue]
 
   TaskRole:
     Type: AWS::IAM::Role
@@ -612,7 +861,14 @@ Resources:
             - { Name: ACS_SMPP_HOST, Value: !Ref SmppHost }
             - { Name: ACS_SMPP_PORT, Value: !Ref SmppPort }
             - { Name: ACS_SMPP_SYSTEM_ID, Value: !Ref SmppSystemId }
+            - { Name: ACS_SMPP_SYSTEM_TYPE, Value: !Ref SmppSystemType }
             - { Name: ACS_SMPP_TLS, Value: !Ref SmppTls }
+            - { Name: ACS_SMPP_SOURCE_ADDR, Value: !Ref SmppSourceAddr }
+            - { Name: ACS_SMPP_SOURCE_ADDR_TON, Value: !Ref SmppSourceAddrTon }
+            - { Name: ACS_SMPP_SOURCE_ADDR_NPI, Value: !Ref SmppSourceAddrNpi }
+            - { Name: ACS_SMPP_DEST_ADDR_TON, Value: !Ref SmppDestAddrTon }
+            - { Name: ACS_SMPP_DEST_ADDR_NPI, Value: !Ref SmppDestAddrNpi }
+            - { Name: ACS_SMPP_TIMEOUT_SECONDS, Value: !Ref SmppTimeoutSeconds }
             - { Name: ACS_DEFAULT_RCS_PROFILE, Value: !Ref DefaultRcsProfile }
             - { Name: ACS_PROVISIONING_VALIDITY_SECONDS, Value: !Ref ProvisioningValiditySeconds }
             - { Name: ACS_TRUSTED_PROXY_CIDRS, Value: !Ref TrustedProxyCidrs }
@@ -632,10 +888,18 @@ Resources:
               - UseSmpp
               - { Name: ACS_SMPP_PASSWORD, ValueFrom: !Ref SmppPasswordSecret }
               - !Ref AWS::NoValue
+            # PEM text rather than a file, because the root filesystem is read-only.
+            - !If
+              - HasSmppTlsCa
+              - { Name: ACS_SMPP_TLS_CA_PEM, ValueFrom: !Ref SmppTlsCaSecretArn }
+              - !Ref AWS::NoValue
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: [HttpListener, TaskIngressFromAlb]
+    # The route table associations: with fixed egress, a task without a public IP
+    # must not start before its subnet routes through the NAT gateway, or it cannot
+    # pull its image.
+    DependsOn: [HttpListener, TaskIngressFromAlb, RouteAssociationAppA, RouteAssociationAppB]
     Properties:
       ServiceName: !Sub '${AWS::StackName}-service'
       Cluster: !Ref Cluster
@@ -651,11 +915,10 @@ Resources:
         DeploymentCircuitBreaker: { Enable: true, Rollback: true }
       NetworkConfiguration:
         AwsvpcConfiguration:
-          # Public IPs are required to pull from ECR without a NAT gateway. No
-          # inbound rule permits anything except the load balancer, so the tasks
-          # are not reachable from the internet. See docs/aws-deployment.md for
-          # the private-subnet variant.
-          AssignPublicIp: ENABLED
+          # Without fixed egress, public IPs are required to pull from ECR without a
+          # NAT gateway. No inbound rule permits anything except the load balancer,
+          # so the tasks are not reachable from the internet either way.
+          AssignPublicIp: !If [UseFixedEgress, DISABLED, ENABLED]
           Subnets: [!Ref AppSubnetA, !Ref AppSubnetB]
           SecurityGroups: [!Ref TaskSecurityGroup]
       LoadBalancers:
@@ -777,6 +1040,16 @@ Outputs:
       Secrets Manager ARN for the SMSC password. Put the operator-issued value,
       then force a new deployment of the service so the tasks read it.
     Value: !Ref SmppPasswordSecret
+
+  EgressIps:
+    Condition: UseFixedEgress
+    Description: >
+      Fixed source addresses of all task egress, SMPP included. Give these to the
+      operator for the SMSC allow-list.
+    Value: !If
+      - NatPerAz
+      - !Join [',', [!Ref EgressIpA, !Ref EgressIpB]]
+      - !Ref EgressIpA
 
   TableName:
     Description: DynamoDB table backing the ACS.

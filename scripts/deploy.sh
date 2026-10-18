@@ -17,13 +17,22 @@ ALLOWED_CIDR=""
 CERT_ARN=""
 ENVIRONMENT="prod"
 DESIRED_COUNT="2"
+FIXED_EGRESS="none"
 SMS_PROVIDER="eum"
 SMS_ORIGINATION=""
 SMPP_HOST=""
 SMPP_PORT="2775"
 SMPP_SYSTEM_ID=""
+SMPP_SYSTEM_TYPE=""
 SMPP_TLS="true"
+SMPP_TLS_CA_SECRET_ARN=""
 SMPP_CIDR=""
+SMPP_SOURCE_ADDR=""
+SMPP_SOURCE_TON="5"
+SMPP_SOURCE_NPI="0"
+SMPP_DEST_TON="1"
+SMPP_DEST_NPI="1"
+SMPP_TIMEOUT="10"
 IMAGE_TAG=""
 SKIP_BUILD="false"
 SKIP_VERIFY="false"
@@ -44,16 +53,33 @@ Options:
                             without it the ACS serves plaintext HTTP.
   --environment <env>       staging | prod (default: prod)
   --desired-count <n>       Number of Fargate tasks (default: 2)
+  --fixed-egress <mode>     none | single | per-az (default: none). single puts
+                            the tasks behind one NAT gateway with an Elastic IP,
+                            per-az one per AZ, so an SMSC can allow-list them; the
+                            addresses are printed at the end. Billed hourly: see
+                            docs/aws-deployment.md#fixed-egress-address
   --sms-provider <p>        eum | sns | smpp (default: eum)
   --sms-origination <id>    AWS End User Messaging origination identity
   --smpp-host <host>        Operator SMSC (required with --sms-provider smpp)
   --smpp-port <port>        SMSC port (default: 2775)
   --smpp-system-id <id>     SMPP system_id (required with --sms-provider smpp)
-  --smpp-cidr <CIDR>        SMSC address range the tasks may reach (required
-                            with --sms-provider smpp)
+  --smpp-cidr <CIDR[,CIDR]> SMSC address ranges the tasks may reach, comma-
+                            separated, at most four (required with
+                            --sms-provider smpp)
   --smpp-tls <true|false>   TLS to the SMSC (default: true). The SMPP password
                             is never a flag: put it into the SmppPasswordSecretArn
                             secret after the first deploy.
+  --smpp-tls-ca-secret-arn <arn>
+                            Complete ARN of a Secrets Manager secret holding the
+                            operator's private CA bundle as PEM text (default:
+                            none, the public CAs are trusted)
+  --smpp-system-type <s>    SMPP system_type (default: empty)
+  --smpp-source-addr <a>    SMPP source_addr (default: empty, the sender id "RCS")
+  --smpp-source-ton <n>     source_addr TON (default: 5, alphanumeric)
+  --smpp-source-npi <n>     source_addr NPI (default: 0, unknown)
+  --smpp-dest-ton <n>       destination TON (default: 1, international)
+  --smpp-dest-npi <n>       destination NPI (default: 1, ISDN/E.164)
+  --smpp-timeout <seconds>  Per SMSC response, 1-60 (default: 10)
   --image-tag <tag>         Image tag to build and deploy (default: git sha)
   --skip-build              Reuse the existing image for this tag
   --skip-verify             Do not run the end-to-end verification
@@ -73,6 +99,7 @@ while [[ $# -gt 0 ]]; do
     --certificate-arn) CERT_ARN="$2"; shift 2 ;;
     --environment) ENVIRONMENT="$2"; shift 2 ;;
     --desired-count) DESIRED_COUNT="$2"; shift 2 ;;
+    --fixed-egress) FIXED_EGRESS="$2"; shift 2 ;;
     --sms-provider) SMS_PROVIDER="$2"; shift 2 ;;
     --sms-origination) SMS_ORIGINATION="$2"; shift 2 ;;
     --smpp-host) SMPP_HOST="$2"; shift 2 ;;
@@ -80,6 +107,14 @@ while [[ $# -gt 0 ]]; do
     --smpp-system-id) SMPP_SYSTEM_ID="$2"; shift 2 ;;
     --smpp-cidr) SMPP_CIDR="$2"; shift 2 ;;
     --smpp-tls) SMPP_TLS="$2"; shift 2 ;;
+    --smpp-tls-ca-secret-arn) SMPP_TLS_CA_SECRET_ARN="$2"; shift 2 ;;
+    --smpp-system-type) SMPP_SYSTEM_TYPE="$2"; shift 2 ;;
+    --smpp-source-addr) SMPP_SOURCE_ADDR="$2"; shift 2 ;;
+    --smpp-source-ton) SMPP_SOURCE_TON="$2"; shift 2 ;;
+    --smpp-source-npi) SMPP_SOURCE_NPI="$2"; shift 2 ;;
+    --smpp-dest-ton) SMPP_DEST_TON="$2"; shift 2 ;;
+    --smpp-dest-npi) SMPP_DEST_NPI="$2"; shift 2 ;;
+    --smpp-timeout) SMPP_TIMEOUT="$2"; shift 2 ;;
     --image-tag) IMAGE_TAG="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD="true"; shift ;;
     --skip-verify) SKIP_VERIFY="true"; shift ;;
@@ -113,6 +148,9 @@ if [[ "$SMS_PROVIDER" == "smpp" ]]; then
     echo "error: --sms-provider smpp requires --smpp-host, --smpp-system-id and --smpp-cidr" >&2
     exit 2
   fi
+elif [[ -n "$SMPP_TLS_CA_SECRET_ARN" ]]; then
+  echo "error: --smpp-tls-ca-secret-arn is used only with --sms-provider smpp" >&2
+  exit 2
 fi
 
 if [[ -z "$CERT_ARN" ]]; then
@@ -143,6 +181,7 @@ echo " environment : $ENVIRONMENT"
 echo " image tag   : $IMAGE_TAG"
 echo " allowed CIDR: $ALLOWED_CIDR"
 echo " TLS         : ${CERT_ARN:-<none, HTTP only>}"
+echo " fixed egress: $FIXED_EGRESS"
 echo "=============================================================="
 
 echo
@@ -184,13 +223,22 @@ PARAMS=(
   "AllowedCidr=${ALLOWED_CIDR}"
   "Environment=${ENVIRONMENT}"
   "DesiredCount=${DESIRED_COUNT}"
+  "FixedEgress=${FIXED_EGRESS}"
   "SmsProvider=${SMS_PROVIDER}"
   "SmsOriginationIdentity=${SMS_ORIGINATION}"
   "SmppHost=${SMPP_HOST}"
   "SmppPort=${SMPP_PORT}"
   "SmppSystemId=${SMPP_SYSTEM_ID}"
+  "SmppSystemType=${SMPP_SYSTEM_TYPE}"
   "SmppTls=${SMPP_TLS}"
+  "SmppTlsCaSecretArn=${SMPP_TLS_CA_SECRET_ARN}"
   "SmppSmscCidr=${SMPP_CIDR}"
+  "SmppSourceAddr=${SMPP_SOURCE_ADDR}"
+  "SmppSourceAddrTon=${SMPP_SOURCE_TON}"
+  "SmppSourceAddrNpi=${SMPP_SOURCE_NPI}"
+  "SmppDestAddrTon=${SMPP_DEST_TON}"
+  "SmppDestAddrNpi=${SMPP_DEST_NPI}"
+  "SmppTimeoutSeconds=${SMPP_TIMEOUT}"
   "CertificateArn=${CERT_ARN}"
 )
 aws cloudformation deploy \
@@ -252,6 +300,18 @@ at the load balancer, with a certificate covering that name.
 Tear down with: scripts/teardown.sh --stack-prefix ${STACK_PREFIX} --region ${REGION}
 ==============================================================
 SUMMARY
+
+if [[ "$FIXED_EGRESS" != "none" ]]; then
+  EGRESS_IPS="$(aws cloudformation describe-stacks \
+    --region "$REGION" --stack-name "$APP_STACK" \
+    --query "Stacks[0].Outputs[?OutputKey=='EgressIps'].OutputValue" --output text)"
+  cat <<EGRESS
+
+Fixed egress: every task connection leaves from ${EGRESS_IPS}. Give the
+operator these addresses for the SMSC allow-list. They are released, and cannot
+be had back, if --fixed-egress returns to none or the stack is torn down.
+EGRESS
+fi
 
 if [[ "$SMS_PROVIDER" == "smpp" ]]; then
   cat <<SMPP

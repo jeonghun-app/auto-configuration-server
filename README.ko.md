@@ -74,7 +74,7 @@ staging과 production은 인메모리 저장소와 모의 SMS 프로바이더를
 | 컴퓨팅 | ECS Fargate |
 | 인그레스 / TLS | Application Load Balancer + ACM |
 | 상태 저장 | DynamoDB (단일 테이블, OTP·DM 세션은 TTL로 자동 만료) |
-| 비밀 | Secrets Manager (관리 토큰, PII 해시 키, SMPP 사용 시 SMSC 비밀번호) |
+| 비밀 | Secrets Manager (관리 토큰, PII 해시 키, SMPP 사용 시 SMSC 비밀번호, 직접 만든 SMSC CA 번들) |
 | 로그 | CloudWatch Logs (구조화 JSON) |
 | 지표 | CloudWatch, stdout의 EMF 형식 — `PutMetricData` 호출 없음 |
 | SMS | 텍스트 OTP는 AWS End User Messaging SMS 또는 Amazon SNS, 포트 지정 OTP는 SMPP 3.4로 사업자 SMSC |
@@ -304,6 +304,7 @@ DM 평면은 `src/acs/catalog/omadm/`의 관리 객체 정의로 동작합니다
 | `ACS_STORE_BACKEND` | `memory` | staging/prod에서 거부. 태스크가 둘 이상이 되는 순간 인메모리 OTP 상태가 깨짐 |
 | `ACS_SMS_PROVIDER` | `mock` | staging/prod에서 거부. `eum`, `sns`는 텍스트 OTP만 보내며, 포트 지정 OTP를 보낼 수 있는 것은 `smpp`뿐 |
 | `ACS_SMPP_TLS` | `true` | SMPP는 비밀번호를 평문으로 보냄. SMSC와의 전용 회선에서만 끌 것. staging/prod에서는 호스트, `system_id`, 비밀번호가 필수 |
+| `ACS_SMPP_TLS_CA_PEM` | *(비어 있음)* | 사업자 사설 CA 번들의 PEM 텍스트. 컨테이너 루트 파일시스템이 읽기 전용이라 스택이 Secrets Manager에서 주입. 읽을 수 없는 번들이면 시작을 거부 |
 | `ACS_SMPP_TIMEOUT_SECONDS` | `10` | SMSC 응답 하나당. 단말의 HTTP 요청이 이를 기다리므로 최대 60 |
 
 환경에 안전하지 않은 설정이면 시작 단계 검증이 기동을 거부합니다. 잘못 설정된

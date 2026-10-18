@@ -58,6 +58,7 @@ def build_sms_sender(settings: Settings, store: Store) -> SmsSender:
             dest_addr_npi=settings.smpp_dest_addr_npi,
             use_tls=settings.smpp_tls,
             tls_ca_file=settings.smpp_tls_ca_file,
+            tls_ca_pem=settings.smpp_tls_ca_pem.get_secret_value(),
             timeout=settings.smpp_timeout_seconds,
             store=store,
         )

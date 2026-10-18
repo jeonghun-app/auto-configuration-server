@@ -15,6 +15,9 @@ from tests.test_dm_wbxml import HEADER, SMALL_WBXML
 from acs.protocol.omadm import wbxml
 
 INPUT_SECONDS = 2.0
+# Filling the whole decoded budget validates ~2 MiB of text per call, which alone
+# approaches INPUT_SECONDS under coverage tracing.
+OUTPUT_LIMIT_SECONDS = 3 * INPUT_SECONDS
 XML_OPEN = b'<SyncML xmlns="SYNCML:SYNCML1.2" xmlns:metinf="syncml:metinf"><Data>'
 XML_CLOSE = b"</Data></SyncML>"
 VALUES = (
@@ -30,33 +33,34 @@ VALUES = (
 )
 
 
-def _timeout(_signum: int, _frame: object) -> None:
-    raise AssertionError(f"a single codec input exceeded {INPUT_SECONDS}s")
-
-
 @contextmanager
-def _deadline() -> Iterator[None]:
+def _deadline(seconds: float = INPUT_SECONDS) -> Iterator[None]:
     # An elapsed-time assertion alone never returns if a mutated input hangs.
+    def _timeout(_signum: int, _frame: object) -> None:
+        raise AssertionError(f"a single codec input exceeded {seconds}s")
+
     previous = signal.signal(signal.SIGALRM, _timeout)
     started = time.perf_counter()
-    signal.setitimer(signal.ITIMER_REAL, INPUT_SECONDS)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
-    assert time.perf_counter() - started < INPUT_SECONDS
+    assert time.perf_counter() - started < seconds
 
 
 def _decode_or_reject(payload: bytes) -> bool:
     with _deadline():
         try:
-            xml = wbxml.decode(payload)
+            xml: bytes | None = wbxml.decode(payload)
         except wbxml.WbxmlError:
-            return False
-        root = ET.fromstring(xml)
-        assert root.tag in ("{SYNCML:SYNCML1.1}SyncML", "{SYNCML:SYNCML1.2}SyncML")
-        assert len(xml) <= wbxml.MAX_XML_BYTES
+            xml = None
+    if xml is None:
+        return False
+    root = ET.fromstring(xml)
+    assert root.tag in ("{SYNCML:SYNCML1.1}SyncML", "{SYNCML:SYNCML1.2}SyncML")
+    assert len(xml) <= wbxml.MAX_XML_BYTES
     return True
 
 
@@ -140,7 +144,8 @@ def test_seeded_syncml_trees_preserve_values_and_structure(
                 use_string_table=use_string_table,
                 opaque=opaque,
             )
-            decoded = ET.fromstring(wbxml.decode(wire))
+            decoded_xml = wbxml.decode(wire)
+        decoded = ET.fromstring(decoded_xml)
         assert _tree_value(decoded) == _tree_value(root), (seed, index)
         assert all(element.text is None for element in decoded.iter() if len(element))
         assert all(element.tail is None for element in decoded.iter())
@@ -223,13 +228,13 @@ def test_the_input_byte_limit_accepts_exactly_the_boundary(excess: int) -> None:
     length = wbxml.MAX_INPUT_BYTES + excess
     wire = prefix + b"x" * (length - len(prefix) - len(suffix)) + suffix
     assert len(wire) == length
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="input exceeds size"):
-                wbxml.decode(wire)
-        else:
+    if excess:
+        with _deadline(), pytest.raises(wbxml.WbxmlError, match="input exceeds size"):
+            wbxml.decode(wire)
+    else:
+        with _deadline():
             xml = wbxml.decode(wire)
-            assert ET.fromstring(xml)[0].text == "x" * (length - len(prefix) - len(suffix))
+        assert ET.fromstring(xml)[0].text == "x" * (length - len(prefix) - len(suffix))
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -253,15 +258,18 @@ def test_the_decoded_byte_limit_includes_escaped_text_and_closing_tags(
         + b"\x00\x01\x01"
     )
     assert len(wire) < wbxml.MAX_INPUT_BYTES
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="output exceeds size"):
-                wbxml.decode(wire)
-        else:
+    if excess:
+        with (
+            _deadline(OUTPUT_LIMIT_SECONDS),
+            pytest.raises(wbxml.WbxmlError, match="output exceeds size"),
+        ):
+            wbxml.decode(wire)
+    else:
+        with _deadline(OUTPUT_LIMIT_SECONDS):
             xml = wbxml.decode(wire)
-            assert xml == XML_OPEN + expanded * repeats + b"x" * remainder + XML_CLOSE
-            assert len(xml) == length
-            assert ET.fromstring(xml)[0].text == raw.decode() * repeats + "x" * remainder
+        assert xml == XML_OPEN + expanded * repeats + b"x" * remainder + XML_CLOSE
+        assert len(xml) == length
+        assert ET.fromstring(xml)[0].text == raw.decode() * repeats + "x" * remainder
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -272,14 +280,16 @@ def test_the_depth_limit_counts_both_empty_and_content_elements(
     depth = wbxml.MAX_DEPTH + excess
     leaf = b"\x54\x03value\x00\x01" if content_leaf else b"\x14"
     wire = HEADER + b"\x6d" + b"\x54" * (depth - 2) + leaf + b"\x01" * (depth - 1)
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="depth limit"):
-                wbxml.decode(wire)
-        else:
+    if excess:
+        with _deadline(), pytest.raises(wbxml.WbxmlError, match="depth limit"):
+            wbxml.decode(wire)
+    else:
+        with _deadline():
             xml = wbxml.decode(wire)
-            assert sum(1 for _ in ET.fromstring(xml).iter()) == depth
-            assert wbxml.encode(xml) == wire
+        assert sum(1 for _ in ET.fromstring(xml).iter()) == depth
+        with _deadline():
+            reencoded = wbxml.encode(xml)
+        assert reencoded == wire
 
 
 @pytest.mark.parametrize("excess", [0, 1])
@@ -290,13 +300,13 @@ def test_the_element_limit_counts_both_empty_and_content_elements(
     count = wbxml.MAX_ELEMENTS + excess
     leaf = b"\x4f\x03x\x00\x01" if content_leaf else b"\x0f"
     wire = HEADER + b"\x6d" + leaf * (count - 1) + b"\x01"
-    with _deadline():
-        if excess:
-            with pytest.raises(wbxml.WbxmlError, match="element count"):
-                wbxml.decode(wire)
-        else:
+    if excess:
+        with _deadline(), pytest.raises(wbxml.WbxmlError, match="element count"):
+            wbxml.decode(wire)
+    else:
+        with _deadline():
             xml = wbxml.decode(wire)
-            assert sum(1 for _ in ET.fromstring(xml).iter()) == count
+        assert sum(1 for _ in ET.fromstring(xml).iter()) == count
 
 
 def _integer_document(field: str, integer: bytes) -> bytes:

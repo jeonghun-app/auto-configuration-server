@@ -117,8 +117,6 @@ watch the `OtpSent` metric.
 
 ## OTP volume alarm fired
 
-Severity: page (SEV2).
-
 1. Look at the rate: metric `OtpSent`, namespace `RcsAcs`.
 2. Check the source distribution in the ALB metrics or access logs (if enabled).
 3. Contain: narrow `AllowedCidr` on the stack, or attach a WAF rate-based rule.
@@ -126,6 +124,8 @@ Severity: page (SEV2).
    environment: `ACS_OTP_MAX_SENDS_PER_MSISDN_PER_DAY`,
    `ACS_OTP_RESEND_COOLDOWN_SECONDS`.
 5. Confirm the account SMS spending limit is set.
+
+Severity: page (SEV2).
 
 ## OTP delivery failed alarm fired
 

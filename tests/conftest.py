@@ -12,6 +12,7 @@ from acs.app import create_app
 from acs.config import Settings
 from acs.domain.models import Subscriber
 from acs.domain.service import ProvisioningService
+from acs.observability import reset_metrics
 from acs.protocol.omacp.catalog import get_catalog
 from acs.protocol.omadm.motree import get_tree
 from acs.protocol.omadm.session import DmService
@@ -94,6 +95,19 @@ def _clear_catalog_caches() -> Iterator[None]:
     yield
     get_catalog.cache_clear()
     get_tree.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_metrics() -> Iterator[None]:
+    """Give every test the metrics emitter its own settings would build.
+
+    :func:`acs.observability.get_metrics` keeps the first emitter for the life of
+    the process, so without this the ``Environment`` dimension a test sees is the
+    one chosen by whichever test happened to build an app first.
+    """
+    reset_metrics()
+    yield
+    reset_metrics()
 
 
 _COLLECTED: pytest.StashKey[frozenset[str]] = pytest.StashKey()

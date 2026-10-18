@@ -7,6 +7,7 @@ the encoded body that would go on the wire, in XML and in WBXML.
 from __future__ import annotations
 
 import json
+import time
 from copy import deepcopy
 
 import pytest
@@ -428,6 +429,26 @@ def test_a_package_that_needs_too_many_messages_is_abandoned_with_its_session(
     assert outcome.status_code == 413
     assert outcome.metric == "DmTooLarge" and outcome.detail == "too_many_messages"
     assert outcome.session_finished and not outcome.body
+    assert dm_store.get_dm_session(SESSION_KEY) is None
+    assert dm_store.get_dm_pending(SESSION_KEY) is None
+
+
+@pytest.mark.spec
+@ENCODINGS
+def test_an_abandoned_remainder_expires_with_its_session(
+    dm: DmService, dm_store: MemoryStore, monkeypatch: pytest.MonkeyPatch, binary: bool
+) -> None:
+    client = Client(dm, SMALL[binary], binary)
+    assert not client.parse(client.send(INIT_BODY)).final
+    session = dm_store.get_dm_session(SESSION_KEY)
+    pending = dm_store.get_dm_pending(SESSION_KEY)
+    assert session is not None and pending is not None
+    # The table TTL is the only thing that removes a remainder whose client went
+    # away mid-package, so the record must carry the session's expiry.
+    assert pending.expires_at == session.expires_at > time.time()
+
+    later = session.expires_at + 1
+    monkeypatch.setattr(time, "time", lambda: later)
     assert dm_store.get_dm_session(SESSION_KEY) is None
     assert dm_store.get_dm_pending(SESSION_KEY) is None
 
